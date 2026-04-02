@@ -6,6 +6,9 @@ BLE_Mac_Static/
 Debug/
 Release/
 
+# Ignorujeme automaticky generovaný soubor s verzí
+Core/Src/version.c
+
 # Ignorujeme objekty a dočasné soubory překladače
 *.o
 *.su

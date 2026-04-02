@@ -45,6 +45,17 @@
 #include "stm32_seq.h"
 #include "dbg_trace.h"
 #include "flash_logger.h"
+#include <stdio.h>  // Pro funkci snprintf
+
+// Tady si definuješ fyzickou revizi desky a typ
+#define HW_REV_BASE "Rev 2.1 Závodník"
+
+// Propojení s automaticky generovaným souborem version.c
+extern const char fw_ver[];
+extern const char git_hash[];
+
+// Globální pole pro finální hardwarovou verzi (vyhrazujeme např. 50 bajtů)
+char hw_ver_full[50];
 
 /* Private typedef -----------------------------------------------------------*/
 /* Private defines -----------------------------------------------------------*/
@@ -104,6 +115,8 @@ int main( void )
 			// Pokud se inicializace psa nepovede, natvrdo celou desku zrestartujeme sami.
 			NVIC_SystemReset();
 	 }
+
+	 snprintf(hw_ver_full, sizeof(hw_ver_full), "%s [%s]", HW_REV_BASE, git_hash);
 
 	 Logger_Init(); // Najde pointer po startu nebo havárii
 
