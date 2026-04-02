@@ -120,6 +120,7 @@ int main( void )
 	 snprintf(hw_ver_full, sizeof(hw_ver_full), "%s [%s]", HW_REV_BASE, git_hash);
 
 	 Logger_Init(); // Najde pointer po startu nebo havárii
+	 Config_Init();
 
    while(1)
    {
@@ -361,21 +362,5 @@ void UTIL_SEQ_Idle(void)
 	// 2. Tím, že zde není žádné __WFI(), procesor M4 už NIKDY neusne.
 	// Bude neustále rotovat na 64 MHz, plně připravený okamžitě zachytit
 	// paket od Kontroly i z velké dálky, aniž by se kdykoliv resetoval!
-}
-
-void Config_Init(void)
-{
-    // Pokud na adrese chybí Magic Word, paměť je prázdná
-    if (DEVICE_CONFIG->magic_word != 0xCAFECAFE)
-    {
-        APP_DBG("CONFIG: Pamet prazdna, aplikuji tovarni nastaveni!");
-
-        // Zde v budoucnu zavoláme zápis do nulté stránky,
-        // zatím se ale můžeme smířit s tím, že čip "čeká" na konfiguraci z BLE.
-    }
-    else
-    {
-        APP_DBG("CONFIG: Nacteno uspesne. ID Zavodnika: %lu", DEVICE_CONFIG->comp_device_id);
-    }
 }
 

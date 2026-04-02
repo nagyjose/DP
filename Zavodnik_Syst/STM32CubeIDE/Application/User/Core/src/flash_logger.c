@@ -140,3 +140,92 @@ void Logger_NewRace(uint8_t* raw_clear_payload)
     
     APP_DBG(">>> NOVY ZAVOD START! Presun na stranku: %lu (Adresa: 0x%08X)", next_page_index, next_page_addr);
 }
+
+// Pomocná funkce pro smazání nulté konfigurační stránky (Page 32)
+static void EraseConfigPage(void)
+{
+    FLASH_EraseInitTypeDef EraseInitStruct;
+    uint32_t PageError;
+
+    // 0x08020000 je přesně 32. stránka (128 KB od začátku paměti 0x08000000)
+    EraseInitStruct.TypeErase = FLASH_TYPEERASE_PAGES;
+    EraseInitStruct.Page = 32;
+    EraseInitStruct.NbPages = 1;
+
+    HAL_FLASH_Unlock();
+    __HAL_FLASH_CLEAR_FLAG(FLASH_FLAG_OPTVERR | FLASH_FLAG_EOP | FLASH_FLAG_WRPERR | FLASH_FLAG_PGSERR);
+    HAL_FLASHEx_Erase(&EraseInitStruct, &PageError);
+    HAL_FLASH_Lock();
+}
+
+// =============================================================================
+// TOVÁRNÍ NASTAVENÍ A ZÁPIS DO FLASH
+// =============================================================================
+static void Config_FactoryReset(void)
+{
+    APP_DBG("CONFIG: Vytvarim tovarni nastaveni...");
+
+    // Vytvoříme prázdnou strukturu v RAM a vynulujeme ji
+    RunnerConfig_t def_cfg;
+    memset(&def_cfg, 0, sizeof(RunnerConfig_t));
+
+    // --- NAPLNĚNÍ VÝCHOZÍMI HODNOTAMI ---
+    def_cfg.magic_word = 0xCAFECAFE;
+    strcpy(def_cfg.hw_revision, "Rev 1.0 ZAVODNIK");
+    // fw_version se doplní dynamicky v main.c pomocí tvého extern Gitu
+
+    // Vysílané informace
+    def_cfg.comp_device_type = 0x00;       // Standardní závodník
+    def_cfg.comp_device_id = 999999;       // Výchozí ID
+    def_cfg.comp_device_hash = 123456;     // Výchozí PIN pro BLE
+
+    // Rozhodovací parametry
+    def_cfg.cooldown_ms = 4000;            // 4 vteřiny
+    def_cfg.required_hits = 3;             // 3 hity
+    def_cfg.num_hits = 5;                  // Z 5 paketů
+    def_cfg.buzzer_onoff = 1;              // Pípání povoleno
+
+    // Texty
+    strcpy(def_cfg.comp_name, "Neznamy Zavodnik");
+    strcpy(def_cfg.comp_nationality, "CZE");
+
+    // --- ZÁPIS DO FLASH PAMĚTI ---
+    EraseConfigPage(); // Smažeme starý odpad
+
+    uint64_t *data_ptr = (uint64_t*)&def_cfg;
+    uint32_t flash_ptr = CONFIG_FLASH_ADDR;
+
+    // Zápis probíhá striktně po 8 bajtech (Double Word)
+    uint32_t double_words_count = sizeof(RunnerConfig_t) / 8;
+
+    HAL_FLASH_Unlock();
+    __HAL_FLASH_CLEAR_FLAG(FLASH_FLAG_OPTVERR | FLASH_FLAG_EOP | FLASH_FLAG_WRPERR | FLASH_FLAG_PGSERR);
+
+    for (uint32_t i = 0; i < double_words_count; i++)
+    {
+        HAL_FLASH_Program(FLASH_TYPEPROGRAM_DOUBLEWORD, flash_ptr, data_ptr[i]);
+        flash_ptr += 8;
+    }
+
+    HAL_FLASH_Lock();
+    APP_DBG("CONFIG: Tovarni nastaveni uspesne zapsano!");
+}
+
+// =============================================================================
+// HLAVNÍ INICIALIZACE (Voláno z main.c)
+// =============================================================================
+void Config_Init(void)
+{
+    // Zkontrolujeme, zda struktura ve Flash obsahuje naše magické slovo
+    if (DEVICE_CONFIG->magic_word != 0xCAFECAFE)
+    {
+        APP_DBG("CONFIG: Pamet neznama nebo poskozena!");
+        Config_FactoryReset();
+    }
+    else
+    {
+        APP_DBG("CONFIG: Nacteno OK. Zavodnik: %s (ID: %lu)",
+                 DEVICE_CONFIG->comp_name, DEVICE_CONFIG->comp_device_id);
+    }
+}
+
