@@ -1,0 +1,35 @@
+# =========================
+# STM32CubeIDE / ARM GCC
+# =========================
+# Ignorujeme složky s buildem - ty se dají vždy znovu vygenerovat z kódu
+BLE_Mac_Static/
+Debug/
+Release/
+
+# Ignorujeme objekty a dočasné soubory překladače
+*.o
+*.su
+*.d
+*.elf
+*.bin
+*.hex
+*.map
+*.log
+
+# Ignorujeme lokální nastavení Eclipse workspace (cesty oken atd.)
+.metadata/
+
+# =========================
+# KiCad (Verze 6, 7, 8)
+# =========================
+# Ignorujeme zálohy a automatické ukládání
+*.bak
+*-bak
+_autosave-*
+*.tmp
+
+# Ignorujeme lokální uživatelská nastavení
+*.kicad_prl
+
+# Ignorujeme cache footprintů
+fp-info-cache

@@ -1,0 +1,349 @@
+/**
+  ******************************************************************************
+ * @file    app_ffd_mac_802_15_4.c
+ * @author  MCD Application Team
+ * @brief   Application based on MAC 802.15.4
+  ******************************************************************************
+  */
+
+/* Includes ------------------------------------------------------------------*/
+#include "app_common.h"
+#include "stm_queue.h"
+#include "utilities_common.h"
+#include "app_entry.h"
+#include "app_ffd_mac_802_15_4.h"
+#include "802_15_4_mac_sap.h"
+#include "app_ffd_mac_802_15_4_process.h"
+#include "dbg_trace.h"
+#include "shci.h"
+#include "stm_logging.h"
+#include "hw_if.h"
+#include <stdbool.h>
+#include "flash_logger.h"
+
+/* Defines -----------------------------------------------*/
+#define DEMO_CHANNEL 26
+
+/* Private function prototypes -----------------------------------------------*/
+static void APP_FFD_MAC_802_15_4_Config(void);
+static void BeaconTimer_Callback(void);
+void APP_MAC_SendBeaconTask(void);
+extern void APP_MAC_RestartBeaconTimer(void);
+
+/* variables -----------------------------------------------*/
+MAC_associateInd_t g_MAC_associateInd;
+MAC_callbacks_t macCbConfig ;
+uint8_t g_srvSerReq;
+uint8_t g_srvDataReq;
+__IO ITStatus CertifOutputPeripheralReady = SET;
+
+// NASE NOVE PROMENNE PRO MAJAK
+uint8_t BeaconTimerId;
+
+// Globální semafor (zámek)
+volatile bool can_send_beacon = true;
+
+
+/* Functions Definition ------------------------------------------------------*/
+void APP_FFD_MAC_802_15_4_Init( APP_MAC_802_15_4_InitMode_t InitMode, TL_CmdPacket_t* pCmdBuffer)
+{
+  APP_ENTRY_RegisterCmdBuffer(pCmdBuffer);
+  APP_ENTRY_TL_MAC_802_15_4_Init();
+  SHCI_C2_MAC_802_15_4_Init();
+
+  /* Register task */
+  UTIL_SEQ_RegTask( 1<<CFG_TASK_MSG_FROM_RF_CORE, UTIL_SEQ_RFU, APP_ENTRY_ProcessMsgFromRFCoreTask);
+  UTIL_SEQ_RegTask( 1<<CFG_TASK_FFD, UTIL_SEQ_RFU,APP_FFD_MAC_802_15_4_SetupTask);
+  UTIL_SEQ_RegTask( 1<<CFG_TASK_SERVICE_COORD, UTIL_SEQ_RFU,APP_FFD_MAC_802_15_4_CoordSrvTask);
+  UTIL_SEQ_RegTask( 1<<CFG_TASK_DATA_COORD, UTIL_SEQ_RFU,APP_FFD_MAC_802_15_4_CoordDataTask);
+  UTIL_SEQ_RegTask( 1<<CFG_TASK_RECEIVE_DATA, UTIL_SEQ_RFU,APP_MAC_ReceiveData);
+
+  // NASE NOVA ULOHA PRO VYSILANI MAJAKU
+  UTIL_SEQ_RegTask( 1<<CFG_TASK_SEND_BEACON, UTIL_SEQ_RFU, APP_MAC_SendBeaconTask);
+
+  // Vytvoreni hardwaroveho casovace
+  HW_TS_Create(CFG_TIM_PROC_ID_ISR, &BeaconTimerId, hw_ts_SingleShot, BeaconTimer_Callback);
+
+  /* Configuration MAC 802_15_4 */
+  APP_FFD_MAC_802_15_4_Config();
+
+  /*Start Main Coordinator - FFD Task*/
+  UTIL_SEQ_SetTask( 1<< CFG_TASK_FFD, CFG_SCH_PRIO_0 );
+}
+
+void APP_FFD_MAC_802_15_4_Stop()
+{
+  MAC_resetReq_t ResetReq;
+  memset(&ResetReq,0x00,sizeof(MAC_resetReq_t));
+  ResetReq.set_default_PIB = TRUE;
+  MAC_MLMEResetReq( &ResetReq );
+  UTIL_SEQ_WaitEvt(EVENT_DEVICE_RESET_CNF);
+
+  UTIL_SEQ_PauseTask( 1<<CFG_TASK_MSG_FROM_RF_CORE);
+  UTIL_SEQ_PauseTask( 1<<CFG_TASK_FFD);
+  UTIL_SEQ_PauseTask( 1<<CFG_TASK_SERVICE_COORD);
+  UTIL_SEQ_PauseTask( 1<<CFG_TASK_DATA_COORD);
+  UTIL_SEQ_PauseTask( 1<<CFG_TASK_RECEIVE_DATA);
+  UTIL_SEQ_PauseTask( 1<<CFG_TASK_SEND_BEACON);
+
+  HW_TS_Stop(BeaconTimerId);
+  HW_TS_Delete(BeaconTimerId); // OPRAVA 2: PŘIDAT TENTO ŘÁDEK! Odstraní časovač z RAM.
+
+  BSP_LED_Off(LED_BLUE);
+}
+
+void APP_FFD_MAC_802_15_4_CoordSrvTask(void)
+{
+  // PRO KONTROLU NEPOTREBUJEME ZADNOU ASOCIACI, ZAVODNIK JEN POSLOUCHA
+  g_srvSerReq = CFG_SRV_SER_REQ_NBR;
+}
+
+void APP_FFD_MAC_802_15_4_CoordDataTask(void)
+{
+  g_srvDataReq = CFG_SRV_DATA_REQ_NBR;
+}
+
+void APP_FFD_MAC_802_15_4_SetupTask(void)
+{
+  //MAC_Status_t MacStatus = MAC_ERROR;
+  MAC_resetReq_t    ResetReq;
+  MAC_setReq_t      SetReq;
+  MAC_startReq_t    StartReq;
+
+  long long extAddr = 0xACDE480000000001; // Zde pak dame unikatni MAC adresu Kontroly
+  uint16_t shortAddr   = 0x1122;
+  uint16_t panId       = 0x1AAA;
+  uint8_t channel      = DEMO_CHANNEL;
+  uint8_t PIB_Value = 0x00;
+  int8_t tx_power_pib_value = 0;
+
+  APP_DBG("Run FFD MAC 802.15.4 - KONTROLA BEACON STARTUP");
+
+  memset(&ResetReq,0x00,sizeof(MAC_resetReq_t));
+  ResetReq.set_default_PIB = TRUE;
+  MAC_MLMEResetReq( &ResetReq );
+  UTIL_SEQ_WaitEvt( 1U<< CFG_EVT_DEVICE_RESET_CNF );
+
+  memset(&SetReq,0x00,sizeof(MAC_setReq_t));
+  SetReq.PIB_attribute = g_MAC_EXTENDED_ADDRESS_c;
+  SetReq.PIB_attribute_valuePtr = (uint8_t*) &extAddr;
+  MAC_MLMESetReq( &SetReq );
+  UTIL_SEQ_WaitEvt( 1U<< CFG_EVT_SET_CNF );
+
+  memset(&SetReq,0x00,sizeof(MAC_setReq_t));
+  SetReq.PIB_attribute = g_MAC_SHORT_ADDRESS_c;
+  SetReq.PIB_attribute_valuePtr =(uint8_t*) &shortAddr;
+  MAC_MLMESetReq( &SetReq );
+  UTIL_SEQ_WaitEvt( 1U << CFG_EVT_SET_CNF );
+
+  /* Vypiname association permit - jsme jen vysilac majaku */
+  memset(&SetReq,0x00,sizeof(MAC_setReq_t));
+  SetReq.PIB_attribute = g_MAC_ASSOCIATION_PERMIT_c;
+  PIB_Value = g_FALSE;
+  SetReq.PIB_attribute_valuePtr = &PIB_Value;
+  MAC_MLMESetReq( &SetReq );
+  UTIL_SEQ_WaitEvt( 1U << CFG_EVT_SET_CNF );
+
+  /* Nastaveni sily signalu (zde by se bralo z BLE konfigurace) */
+  memset(&SetReq,0x00,sizeof(MAC_setReq_t));
+  SetReq.PIB_attribute = g_PHY_TRANSMIT_POWER_c;
+  tx_power_pib_value = 2; // dBm [-21;6]
+  SetReq.PIB_attribute_valuePtr = (uint8_t *)&tx_power_pib_value;
+  MAC_MLMESetReq( &SetReq );
+  UTIL_SEQ_WaitEvt( 1U << CFG_EVT_SET_CNF );
+  
+  /* Start site pro nasi Kontrolu */
+  memset(&StartReq,0x00,sizeof(MAC_startReq_t));
+  memcpy(StartReq.a_PAN_id,(uint8_t*)&panId,0x02);
+  StartReq.channel_number   = channel;
+  StartReq.beacon_order     = 0x0F;
+  StartReq.superframe_order = 0x0F;
+  StartReq.PAN_coordinator  = g_TRUE;
+  StartReq.battery_life_extension = g_FALSE;
+  MAC_MLMEStartReq( &StartReq);
+  UTIL_SEQ_WaitEvt( 1U << CFG_EVT_DEVICE_STARTED_CNF );
+
+  /* Zapnuti RX pro budouci prijem pípnutí od závodníka */
+  memset(&SetReq,0x00,sizeof(MAC_setReq_t));
+  SetReq.PIB_attribute = g_MAC_RX_ON_WHEN_IDLE_c;
+  PIB_Value = g_TRUE;
+  SetReq.PIB_attribute_valuePtr = &PIB_Value;
+  MAC_MLMESetReq( &SetReq );
+  UTIL_SEQ_WaitEvt( 1U << CFG_EVT_SET_CNF );
+
+  APP_DBG("KONTROLA READY - Zapinam pravidelne vysilani majaku!");
+  BSP_LED_On(LED_BLUE);
+
+  // ZDE POPRVE ODPALIME CASOVAC (Zacne vysilat pakety)
+  APP_MAC_RestartBeaconTimer();
+}
+
+
+extern RTC_HandleTypeDef hrtc; // Zpřístupníme si RTC strukturu z main.c
+
+// -----------------------------------------------------------------------------
+// VYLEPŠENÝ PŘEVOD: Vrací pouze sekundy od 1.1.2000 (Zabraňuje přetečení)
+// -----------------------------------------------------------------------------
+uint32_t Get_Calendar_Seconds_Since_2000(RTC_DateTypeDef *sDate, RTC_TimeTypeDef *sTime)
+{
+    uint8_t a = (14 - sDate->Month) / 12;
+    uint16_t y = (sDate->Year + 2000) + 4800 - a; // RTC vrací rok 0-99
+    uint8_t m = sDate->Month + (12 * a) - 3;
+
+    uint32_t JDN = sDate->Date;
+    JDN += (153 * m + 2) / 5;
+    JDN += 365 * y;
+    JDN += y / 4;
+    JDN -= y / 100;
+    JDN += y / 400;
+    JDN -= 32045;
+
+    // 2451545 je Juliánský den pro 1. 1. 2000
+    uint32_t days_since_2000 = JDN - 2451545;
+
+    uint32_t cal_seconds = days_since_2000 * 86400;
+    cal_seconds += sTime->Hours * 3600;
+    cal_seconds += sTime->Minutes * 60;
+    cal_seconds += sTime->Seconds;
+
+    return cal_seconds;
+}
+
+// -----------------------------------------------------------------------------
+// ODESÍLACÍ FUNKCE KONTROLY (S OCHRANOU PROTI ZPOMALENÉMU RTC)
+// -----------------------------------------------------------------------------
+void APP_MAC_SendBeaconTask(void)
+{
+	// 1. OCHRANA PROTI ZADUŠENÍ (Semafor)
+	if (!can_send_beacon) {
+		// Koprocesor ještě bojuje s předchozím paketem!
+		// Přeskočíme toto kolo, ať ho neudusíme.
+		return;
+	}
+
+	static uint8_t msduHandle = 0;
+	static uint8_t payload[6];
+
+	RTC_TimeTypeDef sTime = {0};
+	RTC_DateTypeDef sDate = {0};
+
+	// 1. Odemknutí registrů
+	HAL_RTC_GetTime(&hrtc, &sTime, RTC_FORMAT_BIN);
+	HAL_RTC_GetDate(&hrtc, &sDate, RTC_FORMAT_BIN);
+
+	// 2. ČTENÍ PŘÍMO Z HARDWARU
+	uint32_t ssr = RTC->SSR;
+	uint32_t prer_s = RTC->PRER & RTC_PRER_PREDIV_S;
+	uint32_t prer_a = (RTC->PRER & RTC_PRER_PREDIV_A) >> 16;
+
+	if (prer_s == 0) prer_s = 255;
+	if (prer_a == 0) prer_a = 127;
+
+	// Zjistíme frekvenci (obvykle 256 Hz) a kolik reálných sekund trvá 1 tik kalendáře (obvykle 10s u ST)
+	uint32_t ssr_freq = 32768 / (prer_a + 1);
+	uint32_t seconds_per_tick = (prer_s + 1) / ssr_freq;
+	if (seconds_per_tick == 0) seconds_per_tick = 1;
+
+	// Přesný počet milisekund od posledního kalendářního tiku
+	uint32_t ms_within_tick = ((prer_s - ssr) * 1000) / ssr_freq;
+
+	// 3. ZÍSKÁNÍ PŘESNÝCH DESETIN A UNIX ČASU
+	uint8_t tenths = (ms_within_tick % 1000) / 100;
+
+	uint32_t cal_seconds = Get_Calendar_Seconds_Since_2000(&sDate, &sTime);
+	uint32_t real_seconds_since_2000 = (cal_seconds * seconds_per_tick) + (ms_within_tick / 1000);
+
+	// 946684800 je přesný Unix Timestamp pro 1. 1. 2000
+	uint32_t unix_time = 946684800 + real_seconds_since_2000;
+
+	uint16_t control_id = 31; // Kód kontroly
+
+	// 4. BITOVÁ MAGIE: SKLÁDÁNÍ DO 6 BAJTŮ
+	payload[0] = (uint8_t)(control_id >> 4);
+	payload[1] = (uint8_t)((control_id << 4) | (tenths & 0x0F));
+	payload[2] = (uint8_t)(unix_time >> 24);
+	payload[3] = (uint8_t)(unix_time >> 16);
+	payload[4] = (uint8_t)(unix_time >> 8);
+	payload[5] = (uint8_t)(unix_time & 0xFF);
+
+	// 5. ODESLÁNÍ DO VZDUCHU
+	MAC_dataReq_t dataReq;
+	memset(&dataReq, 0, sizeof(MAC_dataReq_t));
+
+	dataReq.src_addr_mode = g_SHORT_ADDR_MODE_c;
+	dataReq.dst_addr_mode = g_SHORT_ADDR_MODE_c;
+
+	uint16_t panId = 0x1AAA;
+	memcpy(dataReq.a_dst_PAN_id, (uint8_t*)&panId, 2);
+
+	uint16_t destAddr = 0xFFFF;
+	memcpy(&dataReq.dst_address, (uint8_t*)&destAddr, 2);
+
+	dataReq.msdu_length = 6;
+	dataReq.msduPtr = payload;
+	dataReq.msdu_handle = msduHandle++;
+
+	dataReq.ack_Tx = 0x00;
+	dataReq.GTS_Tx = 0x00;
+	dataReq.indirect_Tx = 0x00;
+
+	// 2. ZAMKNUTÍ SEMAFORU A ODESLÁNÍ
+	can_send_beacon = false;
+	// Ochrana proti přerušení řetězce
+	MAC_MCPSDataReq(&dataReq);
+
+	BSP_LED_Toggle(LED_GREEN);
+}
+
+static void BeaconTimer_Callback(void)
+{
+	static uint8_t stuck_counter = 0;
+	static uint8_t fatal_error_counter = 0; // NOVÁ PROMĚNNÁ
+
+	// POJISTKA SEMAFORU (Timeout)
+	if (!can_send_beacon) {
+		stuck_counter++;
+		if (stuck_counter > 5) {
+			// Rádio nám už 5 cyklů (250 ms) nepotvrdilo odeslání, semafor se zasekl!
+			// Násilím ho odemkneme, aby deska neztichla.
+			can_send_beacon = true;
+			stuck_counter = 0;
+
+			// POČÍTÁME SELHÁNÍ RÁDIA
+			fatal_error_counter++;
+			if (fatal_error_counter > 10) {
+				// Rádio nás ignorovalo 10x po sobě. Je definitivně mrtvé!
+				// Zastavíme procesor v nekonečné smyčce. Pes do 1 vteřiny celou desku zresetuje.
+				while(1);
+			}
+		}
+	} else {
+		stuck_counter = 0;
+		fatal_error_counter = 0; // Rádio odpovědělo, vše je OK
+	}
+
+	// Časovač nezávisle a neúprosně tiká každých 50 ms
+	HW_TS_Start(BeaconTimerId, (uint32_t)(50 * 1000 / CFG_TS_TICK_VAL));
+	UTIL_SEQ_SetTask(1 << CFG_TASK_SEND_BEACON, CFG_SCH_PRIO_0);
+}
+
+
+static void APP_FFD_MAC_802_15_4_Config()
+{
+  memset(&macCbConfig,0x00,sizeof(MAC_callbacks_t));
+  macCbConfig.mlmeResetCnfCb = APP_MAC_mlmeResetCnfCb;
+  macCbConfig.mlmeSetCnfCb = APP_MAC_mlmeSetCnfCb;
+  macCbConfig.mlmeStartCnfCb = APP_MAC_mlmeStartCnfCb;
+  macCbConfig.mcpsDataIndCb = APP_MAC_mcpsDataIndCb;
+  macCbConfig.mcpsDataCnfCb = APP_MAC_mcpsDataCnfCb;
+
+  // --- AGRESIVNÍ VYSÍLÁNÍ (VYPNUTÍ CSMA/CA ČEKÁNÍ) ---
+  MAC_setReq_t setReq;
+  uint8_t max_backoffs = 0; // 0 = žádné čekání na volný kanál
+
+  setReq.PIB_attribute = 0x47; // 0x47 je standardní kód pro macMaxCSMABackoffs
+  setReq.PIB_attribute_valuePtr = &max_backoffs;
+  MAC_MLMESetReq(&setReq);
+  // ---------------------------------------------------
+}
+
