@@ -80,7 +80,9 @@ void Logger_Init(void)
 }
 
 // 2. ORAŽENÍ KONTROLY (Bleskový zápis)
-void Logger_SavePunch(uint8_t* raw_payload, uint8_t rssi_abs)
+// Najdi funkci Logger_SavePunch a uprav její tělo takto:
+
+void Logger_SavePunch(uint8_t* raw_payload, uint8_t rssi_abs, int8_t temperature)
 {
     if (current_punch_index >= LOGGER_MAX_RECORDS_PP) {
         APP_DBG("LOGGER ERROR: Stranka je plna!");
@@ -88,7 +90,6 @@ void Logger_SavePunch(uint8_t* raw_payload, uint8_t rssi_abs)
     }
 
     uint32_t saved_addr = current_flash_ptr;
-
     PunchRecord_t record;
 
     // Rychlé zkopírování 6 bajtů surových dat
@@ -97,7 +98,7 @@ void Logger_SavePunch(uint8_t* raw_payload, uint8_t rssi_abs)
     }
 
     record.data.rssi = rssi_abs;
-    record.data.index = (current_punch_index % 256); // Vejde se do 1 bajtu
+    record.data.temperature = temperature; // Nová teplota!
 
     HAL_FLASH_Unlock();
     __HAL_FLASH_CLEAR_FLAG(FLASH_FLAG_OPTVERR | FLASH_FLAG_EOP | FLASH_FLAG_WRPERR | FLASH_FLAG_PGSERR);
@@ -110,36 +111,32 @@ void Logger_SavePunch(uint8_t* raw_payload, uint8_t rssi_abs)
     // --- Rozbalení POUZE pro lidský výpis do logu ---
     uint16_t control_id = (raw_payload[0] << 4) | (raw_payload[1] >> 4);
     uint8_t sub_seconds = raw_payload[1] & 0x0F;
-    uint32_t unix_time = (raw_payload[2] << 24) | (raw_payload[3] << 16) | (raw_payload[4] << 8) | raw_payload[5];
+    uint32_t unix_time = ((uint32_t)raw_payload[2] << 24) | ((uint32_t)raw_payload[3] << 16) |
+                         ((uint32_t)raw_payload[4] << 8) | (uint32_t)raw_payload[5];
 
-    APP_DBG("LOG ULOZEN -> Adr: 0x%08X | IDX: %d | Ctrl_ID: %d | Cas: %lu.%d s | RSSI: -%d dBm",
-             saved_addr, record.data.index, control_id, unix_time, sub_seconds, rssi_abs);
+    APP_DBG("LOG ULOZEN -> Adr: 0x%08X | Ctrl_ID: %d | Cas: %lu.%d s | RSSI: -%d dBm | Teplota: %d C",
+             saved_addr, control_id, unix_time, sub_seconds, rssi_abs, temperature);
 }
 
 // 3. CLEAR KONTROLA (Nulování a přesun na další stránku)
-void Logger_NewRace(uint32_t start_time)
+void Logger_NewRace(uint8_t* raw_clear_payload)
 {
-    // Zjistíme na jaké stránce jsme
     uint32_t current_page_offset = current_flash_ptr - LOGGER_START_ADDR;
     uint32_t current_page_index = current_page_offset / LOGGER_PAGE_SIZE;
     
-    // Posun na další stránku (Kruhový buffer)
     uint32_t next_page_index = (current_page_index + 1) % LOGGER_MAX_PAGES;
     uint32_t next_page_addr = LOGGER_START_ADDR + (next_page_index * LOGGER_PAGE_SIZE);
 
-    // Aby to fungovalo po havárii, musíme SMAZAT ještě stránku za tou naší novou,
-    // abychom vytvořili onu bariéru (N+2) ze samých jedniček.
     uint32_t barrier_page_index = (next_page_index + 1) % LOGGER_MAX_PAGES;
     uint32_t barrier_page_addr = LOGGER_START_ADDR + (barrier_page_index * LOGGER_PAGE_SIZE);
     
-    ErasePage(barrier_page_addr); // Vytvoříme zeď
+    ErasePage(barrier_page_addr);
 
-    // Nastavíme se na novou stránku
     current_flash_ptr = next_page_addr;
     current_punch_index = 0;
     
-    // Zapíšeme hlavičku závodu (nulté oražení)
-    Logger_SavePunch(CLEAR_CONTROL_ID, start_time);
+    // Zápis hlavičky závodu: 6 bajtů z CLEAR majáku, RSSI=0, Teplota=20 (zástupné hodnoty pro hlavičku)
+    Logger_SavePunch(raw_clear_payload, 0, 20);
     
     APP_DBG(">>> NOVY ZAVOD START! Presun na stranku: %lu (Adresa: 0x%08X)", next_page_index, next_page_addr);
 }

@@ -55,7 +55,7 @@ extern const char fw_ver[];
 extern const char git_hash[];
 
 // Globální pole pro finální hardwarovou verzi (vyhrazujeme např. 50 bajtů)
-char hw_ver_full[50];
+char hw_ver_full[32];
 
 /* Private typedef -----------------------------------------------------------*/
 /* Private defines -----------------------------------------------------------*/

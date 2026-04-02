@@ -23,6 +23,7 @@
 #include "hw.h"
 #include "hw_conf.h"
 #include "hw_if.h"
+#include <stdint.h>
 
 /******************************************************************************
  * Application Config
@@ -741,6 +742,64 @@ typedef enum
 #define CFG_TL_MOST_EVENT_PAYLOAD_SIZE 255   /**< Set to 255 with the memory manager and the mailbox */
 
 #define TL_EVENT_FRAME_SIZE ( TL_EVT_HDR_SIZE + CFG_TL_MOST_EVENT_PAYLOAD_SIZE )
+
+
+// Naše vlastní konfigurace
+
+#define CONFIG_FLASH_ADDR 0x08020000 // Nultá stránka
+
+// =========================================================================
+// STRUKTURA ZÁVODNÍKA (1648 bytů celkem -> zarovnáno na 8)
+// =========================================================================
+typedef struct {
+    // Informace o zařízení (118 bytů)
+    uint32_t magic_word;
+    uint32_t control_sum;
+    char     hw_revision[32];
+    char     fw_version[32];
+    uint32_t manuf_date;
+    uint32_t battery_age;
+    uint32_t last_config;
+    uint16_t page_overwrite;
+    char     BLE_device_name[32];
+
+    // Vysílané informace (9 bytů)
+    uint8_t  comp_device_type;
+    uint32_t comp_device_id;
+    uint32_t comp_device_hash;
+
+    // Rozhodovací informace (5 bytů)
+    uint16_t cooldown_ms;
+    uint8_t  required_hits;
+    uint8_t  num_hits;
+    uint8_t  buzzer_onoff;
+
+    // Informace o závodníkovi (1512 bytů)
+    char     comp_name[64];
+    char     comp_nationality[4];
+    uint32_t comp_birthday_date;
+    char     comp_email[64];
+    char     comp_telephone[16];
+    char     comp_address[128];
+    char     comp_registration[8];
+    uint32_t comp_iofid;
+    uint32_t comp_orisid;
+    char     comp_team_1[64];
+    char     comp_team_2[64];
+    char     comp_team_3[64];
+    char     comp_medical_info[512];
+    char     comp_other_info[512];
+
+    // Padding (Opraveno na 4)
+    char     padding[4];        // 1644 + 4 = 1648 bytů
+
+} __attribute__((packed)) RunnerConfig_t;
+
+// Globální ukazatel přímo do Flash paměti (nemusíme to držet v RAM!)
+#define DEVICE_CONFIG ((volatile RunnerConfig_t *)CONFIG_FLASH_ADDR)
+
+void Config_Init(void);
+
 
 #endif /* APP_CONF_H */
 

@@ -46,6 +46,7 @@
 #include "dbg_trace.h"
 #include "flash_logger.h"
 #include <stdio.h>  // Pro funkci snprintf
+#include "app_entry.h"
 
 // Tady si definuješ fyzickou revizi desky a typ
 #define HW_REV_BASE "Rev 2.1 Závodník"
@@ -55,7 +56,7 @@ extern const char fw_ver[];
 extern const char git_hash[];
 
 // Globální pole pro finální hardwarovou verzi (vyhrazujeme např. 50 bajtů)
-char hw_ver_full[50];
+char hw_ver_full[32];
 
 /* Private typedef -----------------------------------------------------------*/
 /* Private defines -----------------------------------------------------------*/
@@ -360,5 +361,21 @@ void UTIL_SEQ_Idle(void)
 	// 2. Tím, že zde není žádné __WFI(), procesor M4 už NIKDY neusne.
 	// Bude neustále rotovat na 64 MHz, plně připravený okamžitě zachytit
 	// paket od Kontroly i z velké dálky, aniž by se kdykoliv resetoval!
+}
+
+void Config_Init(void)
+{
+    // Pokud na adrese chybí Magic Word, paměť je prázdná
+    if (DEVICE_CONFIG->magic_word != 0xCAFECAFE)
+    {
+        APP_DBG("CONFIG: Pamet prazdna, aplikuji tovarni nastaveni!");
+
+        // Zde v budoucnu zavoláme zápis do nulté stránky,
+        // zatím se ale můžeme smířit s tím, že čip "čeká" na konfiguraci z BLE.
+    }
+    else
+    {
+        APP_DBG("CONFIG: Nacteno uspesne. ID Zavodnika: %lu", DEVICE_CONFIG->comp_device_id);
+    }
 }
 
