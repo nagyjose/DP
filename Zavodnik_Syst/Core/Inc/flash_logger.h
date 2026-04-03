@@ -32,5 +32,7 @@ void Logger_Init(void);
 void Logger_SavePunch(uint8_t* raw_payload, uint8_t rssi_abs, int8_t temperature);
 // Upravená hlavička funkce, aby přijala přímo data majáku CLEAR
 void Logger_NewRace(uint8_t* raw_clear_payload);
+// PŘIDÁNO: Funkce pro vyčítání dat do BLE Tunelu
+void Logger_GetDownloadData(uint8_t cmd, uint8_t param, uint8_t **start_ptr, uint32_t *len);
 
 #endif /* FLASH_LOGGER_H */

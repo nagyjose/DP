@@ -293,3 +293,101 @@ void Config_Init(void)
 	}
 }
 
+// -----------------------------------------------------------------------------
+// PŘÍPRAVA DAT PRO BLE TUNEL
+// -----------------------------------------------------------------------------
+void Logger_GetDownloadData(uint8_t cmd, uint8_t param, uint8_t **start_ptr, uint32_t *len)
+{
+	if (cmd == 0x20) {
+		// --- CMD_DOWNLOAD_CURRENT (Jen aktuální závod) ---
+		// current_flash_ptr ukazuje na PRVNÍ VOLNÉ MÍSTO.
+		// Začátek závodu získáme odečtením délky všech zatím zapsaných záznamů.
+		*start_ptr = (uint8_t*)(current_flash_ptr - (current_punch_index * 8));
+		*len = current_punch_index * 8; // Pošleme jen platné záznamy
+
+		// Pojistka: Pokud jsme na úplném začátku nové stránky (Cíl byl 512. záznam)
+		if (*len == 0 && current_flash_ptr > LOGGER_START_ADDR) {
+			*start_ptr = (uint8_t*)(current_flash_ptr - LOGGER_PAGE_SIZE);
+			*len = LOGGER_PAGE_SIZE;
+		}
+	}
+	else if (cmd == 0x22) {
+		// --- CMD_DOWNLOAD_SPECIFIC (N závodů do historie) ---
+		if (param == 0) param = 1; // Pojistka: param=1 znamená předchozí závod
+
+		uint32_t search_ptr = current_flash_ptr;
+		uint32_t end_of_target = 0;
+		uint32_t start_of_target = 0;
+		uint8_t clears_found = 0;
+
+		// Pokud je paměť úplně prázdná
+		if (current_flash_ptr == LOGGER_START_ADDR && current_punch_index == 0) {
+				*start_ptr = NULL; *len = 0; return;
+		}
+
+		// Hledáme pozpátku jako buldok
+		while (1) {
+				// Posun vzad s ošetřením kruhového přetečení na konec paměti
+				if (search_ptr <= LOGGER_START_ADDR) {
+						search_ptr = LOGGER_START_ADDR + (LOGGER_MAX_PAGES * LOGGER_PAGE_SIZE);
+				}
+				search_ptr -= 8;
+
+				// Obešli jsme celou paměť až k našemu výchozímu bodu
+				if (search_ptr == current_flash_ptr) break;
+
+				uint64_t val = *(volatile uint64_t*)search_ptr;
+
+				// TOTO BYLA TA CHYBA: Pokud narazíme na prázdné místo mezi stránkami,
+				// nesmíme to ukončit! Jen ho v klidu přeskočíme a hledáme dál.
+				if (val == 0xFFFFFFFFFFFFFFFF) {
+						continue;
+				}
+
+				// Přečteme ID kontroly
+				uint8_t *raw = (uint8_t*)search_ptr;
+				uint16_t cid = (raw[0] << 4) | (raw[1] >> 4);
+
+				// Narazili jsme na oddělovač závodů
+				if (cid == CLEAR_CONTROL_ID) {
+						clears_found++;
+
+						if (clears_found == param) {
+								// Našli jsme CLEAR novějšího závodu. Zde náš historický závod končí.
+								end_of_target = search_ptr;
+						}
+						else if (clears_found == param + 1) {
+								// Našli jsme CLEAR našeho historického závodu. Tady začíná!
+								start_of_target = search_ptr;
+								break;
+						}
+				}
+		}
+
+		// =====================================================================
+		// VYHODNOCENÍ A PŘEDÁNÍ KRÁJEČI
+		// =====================================================================
+
+		// Pokud jsme nenašli dostatek CLEARů (uživatel chce víc historie, než máme)
+		if (clears_found < (param + 1)) {
+				*start_ptr = NULL;
+				*len = 0;
+				return;
+		}
+
+		*start_ptr = (uint8_t*)start_of_target;
+
+		if (end_of_target >= start_of_target) {
+				*len = end_of_target - start_of_target;
+		} else {
+				// Kruhový buffer: Závod je přetržený přes okraj paměti
+				*len = (LOGGER_START_ADDR + (LOGGER_MAX_PAGES * LOGGER_PAGE_SIZE)) - start_of_target + (end_of_target - LOGGER_START_ADDR);
+		}
+	}
+	else {
+		// Neznámý příkaz
+		*start_ptr = NULL;
+		*len = 0;
+	}
+}
+
