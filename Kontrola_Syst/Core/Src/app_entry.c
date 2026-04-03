@@ -65,6 +65,8 @@ extern void APP_FFD_MAC_802_15_4_SetupTask(void);
 extern void APP_FFD_MAC_802_15_4_CoordSrvTask(void);
 extern void APP_FFD_MAC_802_15_4_CoordDataTask(void);
 
+extern void TestMode_CycleState(void);
+
 extern uint8_t g_srvSerReq;
 extern uint8_t g_srvDataReq;
 extern RTC_HandleTypeDef hrtc;
@@ -567,7 +569,11 @@ void HAL_GPIO_EXTI_Callback( uint16_t GPIO_Pin )
   switch (GPIO_Pin)
   {
   case BUTTON_SW1_PIN:
-    APP_DBG("BUTTON 1 PUSHED ! : NO ACTION MAPPED ON SW1");
+#if ENABLE_HARDWARE_TEST_MODE
+    TestMode_CycleState();
+#else
+    APP_DBG("BUTTON 1 PUSHED ! : NO ACTION (Produkcni mod)");
+#endif
     break;
 
   case BUTTON_SW2_PIN:

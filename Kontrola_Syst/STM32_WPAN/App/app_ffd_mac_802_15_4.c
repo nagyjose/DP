@@ -44,6 +44,48 @@ uint8_t BeaconTimerId;
 // Globální semafor (zámek)
 volatile bool can_send_beacon = true;
 
+// =============================================================================
+// TESTOVACÍ STAVOVÝ AUTOMAT (POUZE PRO VÝVOJ)
+// =============================================================================
+
+#if ENABLE_HARDWARE_TEST_MODE
+volatile uint8_t test_machine_state = 0; // 0=Vypnuto (Config), 1=CLEAR, 2=CHECK, 3=START, 4=CIL, 5=STANDARD
+
+void TestMode_CycleState(void) {
+	test_machine_state++;
+	if (test_machine_state > 9) test_machine_state = 0;
+
+	switch(test_machine_state) {
+		case 0: APP_DBG("TEST MOD: VYPNUTO (Ctu data z Flash)"); break;
+		case 1: APP_DBG("TEST MOD: CLEAR (ID 0)"); break;
+		case 2: APP_DBG("TEST MOD: CHECK (ID 1)"); break;
+		case 3: APP_DBG("TEST MOD: START (ID 2)"); break;
+		case 4: APP_DBG("TEST MOD: STANDARDNI (ID 31)"); break;
+		case 5: APP_DBG("TEST MOD: STANDARDNI (ID 32)"); break;
+		case 6: APP_DBG("TEST MOD: STANDARDNI (ID 33)"); break;
+		case 7: APP_DBG("TEST MOD: STANDARDNI (ID 34)"); break;
+		case 8: APP_DBG("TEST MOD: STANDARDNI (ID 35)"); break;
+		case 9: APP_DBG("TEST MOD: CIL (ID 3)"); break;
+	}
+}
+
+uint16_t TestMode_IdDefine(uint8_t test_machine_state) {
+	uint16_t control_id = 0;
+	if (test_machine_state == 1) control_id = 0;       // Vynutí CLEAR
+	else if (test_machine_state == 2) control_id = 1;  // Vynutí CHECK
+	else if (test_machine_state == 3) control_id = 2;  // Vynutí START
+	else if (test_machine_state == 4) control_id = 31; // Vynutí STANDARDNÍ
+	else if (test_machine_state == 5) control_id = 32; // Vynutí STANDARDNÍ
+	else if (test_machine_state == 6) control_id = 33; // Vynutí STANDARDNÍ
+	else if (test_machine_state == 7) control_id = 34; // Vynutí STANDARDNÍ
+	else if (test_machine_state == 8) control_id = 35; // Vynutí STANDARDNÍ
+	else if (test_machine_state == 9) control_id = 3;  // Vynutí CIL
+
+	return control_id;
+}
+#endif
+// =============================================================================
+
 
 /* Functions Definition ------------------------------------------------------*/
 void APP_FFD_MAC_802_15_4_Init( APP_MAC_802_15_4_InitMode_t InitMode, TL_CmdPacket_t* pCmdBuffer)
@@ -264,6 +306,14 @@ void APP_MAC_SendBeaconTask(void)
 
 	// Čteme ID kontroly přímo z Flash paměti
 	uint16_t control_id = DEVICE_CONFIG->stat_device_type;
+
+	// =========================================================================
+	// INJEKCE TESTOVACÍHO STAVOVÉHO AUTOMATU
+	// =========================================================================
+#if ENABLE_HARDWARE_TEST_MODE
+	control_id = TestMode_IdDefine(test_machine_state);
+#endif
+		// =========================================================================
 
 	// =========================================================================
 	// 4. BITOVÁ MAGIE: SKLÁDÁNÍ DO 6 BAJTŮ PODLE TYPU KONTROLY

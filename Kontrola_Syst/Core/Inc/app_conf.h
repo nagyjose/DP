@@ -28,6 +28,8 @@
  * Application Config
  ******************************************************************************/
 
+#define ENABLE_HARDWARE_TEST_MODE 1 // Pro produkci změň na 0!
+
 /**< generic parameters */
 
 /**
