@@ -21,21 +21,18 @@ extern uint8_t BuzzerTimerId; // Náš nový časovač pro blikání
 volatile uint8_t blink_counter = 0; // Kolikrát má ještě bliknout
 
 // --- NASTAVENÍ FILTRU A ZÁVODNÍKA ---
-#define RSSI_THRESHOLD -40       // LUT: Prahová hodnota pro oražení (např. -60 dBm)
-#define WINDOW_SIZE 5            // Velikost klouzavého okna (posledních 5 paketů)
-#define HITS_REQUIRED 3          // Kolik z nich musí být nad prahem (např. 3 z 5)
-#define COOLDOWN_MS 4000         // Cooldown (4 sekundy ochranná lhůta)
+// Smazali jsme #define pro WINDOW_SIZE, HITS_REQUIRED a COOLDOWN_MS!
+// Budeme je tahat dynamicky z DEVICE_CONFIG.
 
-uint32_t my_runner_id = 123456;  // Unikátní ID tohoto čipu
-uint8_t my_runner_type = 0x00;   // 00 = Normální závodník
+#define DEFAULT_RSSI_THRESHOLD -50 // Výchozí práh pro běžné kontroly (pokud to nemají v paketu)
 
 // Paměť pro filtraci
 static uint16_t scanning_control_id = 0xFFFF;
-static uint8_t  history_mask = 0;
+static uint32_t history_mask = 0; // Zvětšeno na 32 bitů, kdyby někdo nastavil okno větší než 8
 
 // Paměť pro cooldown
 static uint16_t punched_control_id = 0xFFFF;
-static uint32_t last_punch_unix_time = 0;
+static uint32_t last_punch_tick = 0; // ZMĚNA: Používáme lokální tick procesoru v ms!
 
 static uint16_t last_written_control_id = 0xFFFF; // Paměť posledního zápisu do Flash
 
@@ -170,73 +167,90 @@ static void Send_Punch_Response(void)
 // =============================================================================
 // ZPRACOVÁNÍ PŘIJATÝCH DAT (MOZEK ZÁVODNÍKA)
 // =============================================================================
-// =============================================================================
-// ZPRACOVÁNÍ PŘIJATÝCH DAT (MOZEK ZÁVODNÍKA)
-// =============================================================================
 void APP_MAC_ReceiveData(void)
 {
 	if (g_DataInd.msdu_length == 6)
 	{
 		uint8_t *payload = g_DataInd.msduPtr;
 		int8_t rssi = g_DataInd.rssi;
-
 		uint16_t control_id = (payload[0] << 4) | (payload[1] >> 4);
-		uint8_t sub_seconds = payload[1] & 0x0F;
-		uint32_t unix_time = ((uint32_t)payload[2] << 24) | ((uint32_t)payload[3] << 16) |
-												 ((uint32_t)payload[4] << 8)  |  (uint32_t)payload[5];
 
-		// Ochrana proti vícenásobnému oražení - tvůj 4s cooldown
-		if (control_id == punched_control_id && (unix_time - last_punch_unix_time) < 4)
-		{
-			FrameOnGoing = FALSE;
-			return;
+		// =====================================================================
+		// 1. ZÍSKÁNÍ PARAMETRŮ Z KONFIGURAČNÍ PAMĚTI
+		// =====================================================================
+		uint8_t window_size = DEVICE_CONFIG->num_hits;
+		if (window_size == 0 || window_size > 32) window_size = 5; // Fallback
+
+		uint8_t hits_required = DEVICE_CONFIG->required_hits;
+		if (hits_required == 0) hits_required = 3; // Fallback
+
+		uint16_t cooldown_ms = DEVICE_CONFIG->cooldown_ms;
+
+		// =====================================================================
+		// 2. DEKÓDOVÁNÍ PAKETU DLE TYPU KONTROLY [cite: 140, 149]
+		// =====================================================================
+		int8_t required_rssi = DEFAULT_RSSI_THRESHOLD;
+		uint32_t unix_time = 0;
+		uint8_t sub_seconds = 0;
+
+		if (control_id == CLEAR_CONTROL_ID) {
+			// U CLEAR kontroly je v 5. bajtu uložen požadovaný RSSI limit
+			required_rssi = -(int8_t)payload[5];
+		} else {
+			// Běžná kontrola - čteme čas [cite: 180, 181]
+			sub_seconds = payload[1] & 0x0F;
+			unix_time = ((uint32_t)payload[2] << 24) | ((uint32_t)payload[3] << 16) |
+									((uint32_t)payload[4] << 8)  |  (uint32_t)payload[5];
 		}
 
-		// Filtrace - Klouzavé okno
+		uint32_t current_tick = HAL_GetTick(); // Lokální čas procesoru v ms
+
+		// =====================================================================
+		// 3. COOLDOWN (Ochrana proti vícenásobnému oražení) [cite: 252]
+		// =====================================================================
+		if (control_id == punched_control_id && (current_tick - last_punch_tick) < cooldown_ms)
+		{
+			FrameOnGoing = FALSE;
+			return; // Jsme v ochranné lhůtě, ignorujeme
+		}
+
+		// =====================================================================
+		// 4. FILTRACE - KLOUZAVÉ OKNO [cite: 183, 253]
+		// =====================================================================
 		if (control_id != scanning_control_id) {
 			scanning_control_id = control_id;
 			history_mask = 0;
 		}
 
 		history_mask <<= 1;
-		if (rssi >= RSSI_THRESHOLD) { history_mask |= 1; }
+		if (rssi >= required_rssi) { history_mask |= 1; }
 
 		uint8_t valid_hits = 0;
-		for (int i = 0; i < WINDOW_SIZE; i++) {
+		for (int i = 0; i < window_size; i++) {
 			if (history_mask & (1 << i)) valid_hits++;
 		}
 
-		if (valid_hits >= HITS_REQUIRED)
+		// =====================================================================
+		// 5. VYHODNOCENÍ ÚSPĚŠNÉHO ORAŽENÍ
+		// =====================================================================
+		if (valid_hits >= hits_required)
 		{
-			char control_type_str[16];
-			if (control_id == CLEAR_CONTROL_ID) {
-				strcpy(control_type_str, "CLEAR");
-			} else if (control_id <= 30) {
-				strcpy(control_type_str, "SPECIFICKA");
-			} else {
-				strcpy(control_type_str, "STANDARDNI");
-			}
+			APP_DBG(">>> KONTROLA %d ORAZENA! | Sila: %d dBm (Min: %d) | Hity: %d/%d",
+							control_id, rssi, required_rssi, valid_hits, window_size);
 
-			APP_DBG(">>> %s KONTROLA ORAZENA! | ID: %d | Cas: %lu.%d s | Sila: %d dBm",
-							control_type_str, control_id, unix_time, sub_seconds, rssi);
-
-			// Nastavení cooldownu
+			// Zápis nového cooldownu
 			punched_control_id = control_id;
-			last_punch_unix_time = unix_time;
+			last_punch_tick = current_tick;
 			history_mask = 0;
 
-			// Odpovíme 3bajtovým paketem
+			// Závodník odesílá odpověď kontrole (obsahuje jeho ID a typ z Configu) [cite: 184, 185]
 			Send_Punch_Response();
 
-			// =================================================================
-			// ANTI-SPAM LOGIKA & ZÁPIS DO FLASH
-			// =================================================================
-			// Zjistíme, jestli to je typ kontroly podléhající Anti-Spamu (Start, Check, Standardní)
+			// --- ANTI-SPAM LOGIKA & ZÁPIS DO FLASH [cite: 226, 227] ---
 			bool is_standard_control = (control_id >= 31 && control_id <= 4095) ||
 																 (control_id == CHECK_CONTROL_ID) ||
 																 (control_id == START_CONTROL_ID);
 
-			// Pokud to je standardní kontrola a její ID se shoduje s naposledy zapsaným, je to Spam
 			bool is_spam = is_standard_control && (control_id == last_written_control_id);
 
 			if (!is_spam)
@@ -250,12 +264,9 @@ void APP_MAC_ReceiveData(void)
 					Logger_SavePunch(payload, abs_rssi, teplota);
 					last_written_control_id = control_id;
 
-					// =========================================================
-					// KROK 4: PŘEPNUTÍ DO BLE PŘI ORAŽENÍ CÍLE
-					// =========================================================
+					// PŘEPNUTÍ DO BLE PŘI ORAŽENÍ CÍLE [cite: 188, 221, 222]
 					if (control_id == FINISH_CONTROL_ID) {
 						APP_DBG(">>> CIL ORAZEN -> INICIOVANO PREPNUTI DO BLE!");
-						// Vyvoláme úkol, který je definován v app_entry.c
 						UTIL_SEQ_SetTask(1U << CFG_TASK_INIT_SWITCH_PROTOCOL, CFG_SCH_PRIO_0);
 					}
 				}
@@ -265,16 +276,24 @@ void APP_MAC_ReceiveData(void)
 				APP_DBG("ANTI-SPAM: Kontrola %d jiz zapsana, pouze signalizuji!", control_id);
 			}
 
-			// Vizuální a zvuková signalizace proběhne VŽDY (i při Anti-Spamu)
+			// --- SIGNALIZACE (LED a BZUČÁK) [cite: 229, 253] ---
 			if (blink_counter == 0)
 			{
-				blink_counter = 40;
+				blink_counter = 40; // Počet kroků časovače
+
+				// Pokud má závodník v Configu povolený bzučák, zapneme ho
+				if (DEVICE_CONFIG->buzzer_onoff == 1) {
+					// ZDE FYZICKY ZAPNOUT BZUČÁK (např. přes HAL_GPIO_WritePin)
+					// BSP_LED_On(LED_RED); // Placeholder pro bzučák
+				}
+
 				HW_TS_Start(BuzzerTimerId, (uint32_t)(100 * 1000 / CFG_TS_TICK_VAL));
 			}
 		}
 		else
 		{
-			APP_DBG("Skenuji Kontrolu %d (Hity: %d/%d, RSSI: %d dBm)", control_id, valid_hits, HITS_REQUIRED, rssi);
+			APP_DBG("Skenuji Kontrolu %d (Hity: %d/%d, RSSI: %d dBm, Req: %d)",
+							control_id, valid_hits, hits_required, rssi, required_rssi);
 		}
 	}
 
