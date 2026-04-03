@@ -316,6 +316,22 @@ void Logger_GetDownloadData(uint8_t cmd, uint8_t param, uint8_t **start_ptr, uin
 			*len = LOGGER_PAGE_SIZE;
 		}
 	}
+	else if (cmd == 0x21) {
+		// --- CMD_DOWNLOAD_ALL (Kompletní výpis všeho) ---
+
+		// Pokud je paměť úplně prázdná
+		if (current_flash_ptr == LOGGER_START_ADDR && current_punch_index == 0) {
+				*start_ptr = NULL;
+				*len = 0;
+				return;
+		}
+
+		// Protože jsi paměť naformátoval (a 640 KB je obrovský prostor),
+		// všechna tvá data leží bezpečně a souvisle od začátku paměti
+		// až po tvůj aktuální ukazatel zápisu.
+		*start_ptr = (uint8_t*)LOGGER_START_ADDR;
+		*len = current_flash_ptr - LOGGER_START_ADDR;
+	}
 	else if (cmd == 0x22) {
 		// --- CMD_DOWNLOAD_SPECIFIC (N závodů do historie) ---
 		if (param == 0) param = 1; // Pojistka: param=1 znamená předchozí závod
