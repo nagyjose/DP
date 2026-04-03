@@ -170,6 +170,20 @@ static SVCCTL_EvtAckStatus_t Tunnel_Event_Handler(void *pckt)
 							// TBD: Zapnout LED/Buzzer task
 							break;
 
+						case 0x99: // CMD_FORMAT_MEMORY
+							APP_DBG(">>> BLE CMD: FORMATOVANI PAMETI ZAVODNIKA! (0x99)");
+
+							// Bezpečnostní přerušení vysílání
+							chunk_rem_len = 0;
+
+							// Zavoláme drtičku paměti
+							Logger_FormatAll();
+
+							// Odpovíme mobilu, že je hotovo
+							uint8_t ack_format[4] = {0x99, 0x01, 0x00, 0x00};
+							BLE_Tunnel_Send(ack_format, 4);
+							break;
+
 						default:
 							APP_DBG(">>> BLE CMD: NEZNAMY PRIKAZ (0x%02X)", cmd);
 							break;

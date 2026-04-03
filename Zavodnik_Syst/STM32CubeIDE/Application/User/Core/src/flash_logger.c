@@ -5,6 +5,9 @@
 #include "app_conf.h"
 #include "app_common.h"
 #include <stdbool.h>
+#include "stm32wbxx_hal.h"
+
+extern IWDG_HandleTypeDef hiwdg; // Potřebujeme sáhnout na psa v main.c
 
 // Globální proměnné pro rychlý zápis z RAM
 static uint32_t current_flash_ptr = LOGGER_START_ADDR;
@@ -135,10 +138,12 @@ void Logger_SavePunch(uint8_t* raw_payload, uint8_t rssi_abs, int8_t temperature
 // 3. CLEAR KONTROLA (Nulování a přesun na další stránku)
 void Logger_NewRace(uint8_t* raw_clear_payload)
 {
-	uint32_t current_page_offset = current_flash_ptr - LOGGER_START_ADDR;
-	uint32_t current_page_index = current_page_offset / LOGGER_PAGE_SIZE;
-	uint32_t current_page_addr = LOGGER_START_ADDR + (current_page_index * LOGGER_PAGE_SIZE);
+	//uint32_t current_page_offset = current_flash_ptr - LOGGER_START_ADDR;
+	//uint32_t current_page_index = current_page_offset / LOGGER_PAGE_SIZE;
+	//uint32_t current_page_addr = LOGGER_START_ADDR + (current_page_index * LOGGER_PAGE_SIZE);
 
+	uint32_t current_page_addr = current_flash_ptr - (current_punch_index * 8);
+	uint32_t current_page_index = (current_page_addr - LOGGER_START_ADDR) / LOGGER_PAGE_SIZE;
 	// =========================================================================
 	// INTELIGENTNÍ CLEAR (ZÁCHRANA PAMĚTI)
 	// =========================================================================
@@ -322,46 +327,46 @@ void Logger_GetDownloadData(uint8_t cmd, uint8_t param, uint8_t **start_ptr, uin
 
 		// Pokud je paměť úplně prázdná
 		if (current_flash_ptr == LOGGER_START_ADDR && current_punch_index == 0) {
-				*start_ptr = NULL; *len = 0; return;
+			*start_ptr = NULL; *len = 0; return;
 		}
 
 		// Hledáme pozpátku jako buldok
 		while (1) {
-				// Posun vzad s ošetřením kruhového přetečení na konec paměti
-				if (search_ptr <= LOGGER_START_ADDR) {
-						search_ptr = LOGGER_START_ADDR + (LOGGER_MAX_PAGES * LOGGER_PAGE_SIZE);
+			// Posun vzad s ošetřením kruhového přetečení na konec paměti
+			if (search_ptr <= LOGGER_START_ADDR) {
+				search_ptr = LOGGER_START_ADDR + (LOGGER_MAX_PAGES * LOGGER_PAGE_SIZE);
+			}
+			search_ptr -= 8;
+
+			// Obešli jsme celou paměť až k našemu výchozímu bodu
+			if (search_ptr == current_flash_ptr) break;
+
+			uint64_t val = *(volatile uint64_t*)search_ptr;
+
+			// TOTO BYLA TA CHYBA: Pokud narazíme na prázdné místo mezi stránkami,
+			// nesmíme to ukončit! Jen ho v klidu přeskočíme a hledáme dál.
+			if (val == 0xFFFFFFFFFFFFFFFF) {
+				continue;
+			}
+
+			// Přečteme ID kontroly
+			uint8_t *raw = (uint8_t*)search_ptr;
+			uint16_t cid = (raw[0] << 4) | (raw[1] >> 4);
+
+			// Narazili jsme na oddělovač závodů
+			if (cid == CLEAR_CONTROL_ID) {
+				clears_found++;
+
+				if (clears_found == param) {
+					// Našli jsme CLEAR novějšího závodu. Zde náš historický závod končí.
+					end_of_target = search_ptr;
 				}
-				search_ptr -= 8;
-
-				// Obešli jsme celou paměť až k našemu výchozímu bodu
-				if (search_ptr == current_flash_ptr) break;
-
-				uint64_t val = *(volatile uint64_t*)search_ptr;
-
-				// TOTO BYLA TA CHYBA: Pokud narazíme na prázdné místo mezi stránkami,
-				// nesmíme to ukončit! Jen ho v klidu přeskočíme a hledáme dál.
-				if (val == 0xFFFFFFFFFFFFFFFF) {
-						continue;
+				else if (clears_found == param + 1) {
+					// Našli jsme CLEAR našeho historického závodu. Tady začíná!
+					start_of_target = search_ptr;
+					break;
 				}
-
-				// Přečteme ID kontroly
-				uint8_t *raw = (uint8_t*)search_ptr;
-				uint16_t cid = (raw[0] << 4) | (raw[1] >> 4);
-
-				// Narazili jsme na oddělovač závodů
-				if (cid == CLEAR_CONTROL_ID) {
-						clears_found++;
-
-						if (clears_found == param) {
-								// Našli jsme CLEAR novějšího závodu. Zde náš historický závod končí.
-								end_of_target = search_ptr;
-						}
-						else if (clears_found == param + 1) {
-								// Našli jsme CLEAR našeho historického závodu. Tady začíná!
-								start_of_target = search_ptr;
-								break;
-						}
-				}
+			}
 		}
 
 		// =====================================================================
@@ -370,19 +375,37 @@ void Logger_GetDownloadData(uint8_t cmd, uint8_t param, uint8_t **start_ptr, uin
 
 		// Pokud jsme nenašli dostatek CLEARů (uživatel chce víc historie, než máme)
 		if (clears_found < (param + 1)) {
-				*start_ptr = NULL;
-				*len = 0;
-				return;
+			*start_ptr = NULL;
+			*len = 0;
+			return;
 		}
 
 		*start_ptr = (uint8_t*)start_of_target;
 
-		if (end_of_target >= start_of_target) {
-				*len = end_of_target - start_of_target;
-		} else {
-				// Kruhový buffer: Závod je přetržený přes okraj paměti
-				*len = (LOGGER_START_ADDR + (LOGGER_MAX_PAGES * LOGGER_PAGE_SIZE)) - start_of_target + (end_of_target - LOGGER_START_ADDR);
+		// NOVÉ: Přesný výpočet délky bez prázdné vaty (0xFF)
+		uint32_t exact_len = 0;
+		uint32_t read_ptr = start_of_target;
+
+		// Půjdeme od začátku závodu dopředu, dokud nenarazíme na další závod (end_of_target)
+		// NEBO dokud nenarazíme na prázdnou paměť (0xFFFFFFFFFFFFFFFF).
+		while (read_ptr != end_of_target) {
+			uint64_t val = *(volatile uint64_t*)read_ptr;
+
+			// Tady závod reálně končí, zbytek stránky je už jen prázdná vata
+			if (val == 0xFFFFFFFFFFFFFFFF) {
+				break;
+			}
+
+			exact_len += 8;
+
+			// Kruhový posun dopředu
+			read_ptr += 8;
+			if (read_ptr >= LOGGER_START_ADDR + (LOGGER_MAX_PAGES * LOGGER_PAGE_SIZE)) {
+				read_ptr = LOGGER_START_ADDR;
+			}
 		}
+
+		*len = exact_len;
 	}
 	else {
 		// Neznámý příkaz
@@ -391,3 +414,24 @@ void Logger_GetDownloadData(uint8_t cmd, uint8_t param, uint8_t **start_ptr, uin
 	}
 }
 
+// -----------------------------------------------------------------------------
+// FORMÁTOVÁNÍ CELÉ PAMĚTI (Příkaz z BLE)
+// -----------------------------------------------------------------------------
+void Logger_FormatAll(void)
+{
+	APP_DBG("--- FORMATOVANI CELE PAMETI (159 stranek) ZACAHA... ---");
+
+	for (int i = 0; i < LOGGER_MAX_PAGES; i++) {
+		uint32_t page_addr = LOGGER_START_ADDR + (i * LOGGER_PAGE_SIZE);
+		ErasePage(page_addr);
+
+		// Nakrmíme psa, aby nás během dlouhého mazání nesežral
+		HAL_IWDG_Refresh(&hiwdg);
+	}
+
+	// Reset ukazatelů na úplný začátek
+	current_flash_ptr = LOGGER_START_ADDR;
+	current_punch_index = 0;
+
+	APP_DBG("--- FORMATOVANI DOKONCENO, PAMET JE CISTA ---");
+}

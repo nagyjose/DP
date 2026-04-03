@@ -34,5 +34,6 @@ void Logger_SavePunch(uint8_t* raw_payload, uint8_t rssi_abs, int8_t temperature
 void Logger_NewRace(uint8_t* raw_clear_payload);
 // PŘIDÁNO: Funkce pro vyčítání dat do BLE Tunelu
 void Logger_GetDownloadData(uint8_t cmd, uint8_t param, uint8_t **start_ptr, uint32_t *len);
+void Logger_FormatAll(void);
 
 #endif /* FLASH_LOGGER_H */
