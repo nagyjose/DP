@@ -20,6 +20,7 @@
 #include "hw_if.h"
 #include <stdbool.h>
 #include "flash_logger.h"
+#include "app_conf.h"
 
 /* Defines -----------------------------------------------*/
 #define DEMO_CHANNEL 26
@@ -144,13 +145,18 @@ void APP_FFD_MAC_802_15_4_SetupTask(void)
   MAC_MLMESetReq( &SetReq );
   UTIL_SEQ_WaitEvt( 1U << CFG_EVT_SET_CNF );
 
-  /* Nastaveni sily signalu (zde by se bralo z BLE konfigurace) */
-  memset(&SetReq,0x00,sizeof(MAC_setReq_t));
-  SetReq.PIB_attribute = g_PHY_TRANSMIT_POWER_c;
-  tx_power_pib_value = 2; // dBm [-21;6]
-  SetReq.PIB_attribute_valuePtr = (uint8_t *)&tx_power_pib_value;
-  MAC_MLMESetReq( &SetReq );
-  UTIL_SEQ_WaitEvt( 1U << CFG_EVT_SET_CNF );
+  /* Nastaveni sily signalu DYNAMICKY Z FLASH PAMĚTI */
+	memset(&SetReq,0x00,sizeof(MAC_setReq_t));
+	SetReq.PIB_attribute = g_PHY_TRANSMIT_POWER_c;
+
+	tx_power_pib_value = DEVICE_CONFIG->tx_power;
+	// Ochrana proti hodnotám mimo limit čipu ST
+	if (tx_power_pib_value > 6) tx_power_pib_value = 6;
+	if (tx_power_pib_value < -21) tx_power_pib_value = -21;
+
+	SetReq.PIB_attribute_valuePtr = (uint8_t *)&tx_power_pib_value;
+	MAC_MLMESetReq( &SetReq );
+	UTIL_SEQ_WaitEvt( 1U << CFG_EVT_SET_CNF );
   
   /* Start site pro nasi Kontrolu */
   memset(&StartReq,0x00,sizeof(MAC_startReq_t));
@@ -256,15 +262,44 @@ void APP_MAC_SendBeaconTask(void)
 	// 946684800 je přesný Unix Timestamp pro 1. 1. 2000
 	uint32_t unix_time = 946684800 + real_seconds_since_2000;
 
-	uint16_t control_id = 31; // Kód kontroly
+	// Čteme ID kontroly přímo z Flash paměti
+	uint16_t control_id = DEVICE_CONFIG->stat_device_type;
 
-	// 4. BITOVÁ MAGIE: SKLÁDÁNÍ DO 6 BAJTŮ
-	payload[0] = (uint8_t)(control_id >> 4);
-	payload[1] = (uint8_t)((control_id << 4) | (tenths & 0x0F));
-	payload[2] = (uint8_t)(unix_time >> 24);
-	payload[3] = (uint8_t)(unix_time >> 16);
-	payload[4] = (uint8_t)(unix_time >> 8);
-	payload[5] = (uint8_t)(unix_time & 0xFF);
+	// =========================================================================
+	// 4. BITOVÁ MAGIE: SKLÁDÁNÍ DO 6 BAJTŮ PODLE TYPU KONTROLY
+	// =========================================================================
+	if (control_id == 0)
+	{
+		// --- A) KONTROLA CLEAR ---
+		// Nepotřebuje čas! Místo toho posílá parametry závodu.
+		uint32_t race_id = DEVICE_CONFIG->event_id;
+		uint8_t country = DEVICE_CONFIG->event_nation;
+		uint8_t req_rssi = DEVICE_CONFIG->required_rssi;
+
+		// Byte 0: ID (horních 8 bitů - vždy 0x00 pro CLEAR)
+		payload[0] = 0x00;
+		// Byte 1: ID (dolní 4 bity - 0x0) | Horní 4 bity z 20bitového race_id
+		payload[1] = (uint8_t)((race_id >> 16) & 0x0F);
+		// Byte 2: Prostředních 8 bitů z race_id
+		payload[2] = (uint8_t)(race_id >> 8);
+		// Byte 3: Dolních 8 bitů z race_id
+		payload[3] = (uint8_t)(race_id & 0xFF);
+		// Byte 4: Stát
+		payload[4] = country;
+		// Byte 5: RSSI threshold
+		payload[5] = req_rssi;
+	}
+	else
+	{
+		// --- B) STANDARDNÍ KONTROLA (Start, Cíl, Check, Normální) ---
+		// Posílá 12bit ID a k tomu přidává RTC čas a desetiny sekundy.
+		payload[0] = (uint8_t)(control_id >> 4);
+		payload[1] = (uint8_t)((control_id << 4) | (tenths & 0x0F));
+		payload[2] = (uint8_t)(unix_time >> 24);
+		payload[3] = (uint8_t)(unix_time >> 16);
+		payload[4] = (uint8_t)(unix_time >> 8);
+		payload[5] = (uint8_t)(unix_time & 0xFF);
+	}
 
 	// 5. ODESLÁNÍ DO VZDUCHU
 	MAC_dataReq_t dataReq;
@@ -322,8 +357,12 @@ static void BeaconTimer_Callback(void)
 		fatal_error_counter = 0; // Rádio odpovědělo, vše je OK
 	}
 
-	// Časovač nezávisle a neúprosně tiká každých 50 ms
-	HW_TS_Start(BeaconTimerId, (uint32_t)(50 * 1000 / CFG_TS_TICK_VAL));
+	// Získáme periodu z konfigurace. Pokud je tam nesmysl (např. 0), dáme bezpečný fallback 50 ms.
+	uint32_t period_ms = DEVICE_CONFIG->beacon_period_ms;
+	if (period_ms < 10) period_ms = 50;
+
+	// Časovač nezávisle a neúprosně tiká
+	HW_TS_Start(BeaconTimerId, (uint32_t)(period_ms * 1000 / CFG_TS_TICK_VAL));
 	UTIL_SEQ_SetTask(1 << CFG_TASK_SEND_BEACON, CFG_SCH_PRIO_0);
 }
 

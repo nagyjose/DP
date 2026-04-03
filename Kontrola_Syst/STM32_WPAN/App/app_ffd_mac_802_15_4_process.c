@@ -62,51 +62,76 @@ MAC_Status_t APP_MAC_mlmeStartCnfCb( const  MAC_startCnf_t * pStartCnf )
 }
 
 // -----------------------------------------------------------------------------
-// ZPRACOVÁNÍ PŘIJATÝCH DAT (Zde budeme chytat ty 3 byty od závodníka)
+// ZPRACOVÁNÍ PŘIJATÝCH DAT (Zde chytáme ty 3 byty od závodníka/konfigurátora)
 // -----------------------------------------------------------------------------
 void APP_MAC_ReceiveData(void)
 {
 	// Pokud Kontrola chytí 3bajtový paket (Odpověď od Závodníka)
 	if (g_DataInd.msdu_length == 3)
 	{
-	    uint8_t *payload = g_DataInd.msduPtr;
+		uint8_t *payload = g_DataInd.msduPtr;
 
-	    // 1. ZÍSKÁNÍ AKTUÁLNÍHO ČASU PRO ZÁZNAM
-			RTC_TimeTypeDef sTime = {0};
-			RTC_DateTypeDef sDate = {0};
-			HAL_RTC_GetTime(&hrtc, &sTime, RTC_FORMAT_BIN);
-			HAL_RTC_GetDate(&hrtc, &sDate, RTC_FORMAT_BIN);
+		// 1. Zpětná dešifrace prvního bajtu (Typ a ID)
+		uint8_t device_type = (payload[0] >> 6) & 0x03;
+		uint32_t received_id_or_hash = ((payload[0] & 0x3F) << 16) | (payload[1] << 8) | payload[2];
 
-			uint32_t ssr = RTC->SSR;
-			uint32_t prer_s = RTC->PRER & RTC_PRER_PREDIV_S;
-			uint32_t prer_a = (RTC->PRER & RTC_PRER_PREDIV_A) >> 16;
-			if (prer_s == 0) prer_s = 255;
-			if (prer_a == 0) prer_a = 127;
+		if (device_type == 0x00)
+		{
+			// =================================================================
+			// A) STANDARDNÍ ZÁVODNÍK -> ZÁPIS DO PAMĚTI
+			// =================================================================
+			APP_DBG(">>> ZAVODNIK ORAZIL! ID: %lu", received_id_or_hash);
 
-			uint32_t ssr_freq = 32768 / (prer_a + 1);
-			uint32_t seconds_per_tick = (prer_s + 1) / ssr_freq;
-			if (seconds_per_tick == 0) seconds_per_tick = 1;
+		// Získání aktuálního času pro záznam
+		RTC_TimeTypeDef sTime = {0};
+		RTC_DateTypeDef sDate = {0};
+		HAL_RTC_GetTime(&hrtc, &sTime, RTC_FORMAT_BIN);
+		HAL_RTC_GetDate(&hrtc, &sDate, RTC_FORMAT_BIN);
 
-			uint32_t ms_within_tick = ((prer_s - ssr) * 1000) / ssr_freq;
-			uint8_t sub_sec = (ms_within_tick % 1000) / 100; // Desetiny vteřiny (0-9)
+		uint32_t ssr = RTC->SSR;
+		uint32_t prer_s = RTC->PRER & RTC_PRER_PREDIV_S;
+		uint32_t prer_a = (RTC->PRER & RTC_PRER_PREDIV_A) >> 16;
+		if (prer_s == 0) prer_s = 255;
+		if (prer_a == 0) prer_a = 127;
 
-			uint32_t cal_seconds = Get_Calendar_Seconds_Since_2000(&sDate, &sTime);
-			uint32_t real_seconds_since_2000 = (cal_seconds * seconds_per_tick) + (ms_within_tick / 1000);
-			uint32_t unix_time = 946684800 + real_seconds_since_2000;
+		uint32_t ssr_freq = 32768 / (prer_a + 1);
+		uint32_t seconds_per_tick = (prer_s + 1) / ssr_freq;
+		if (seconds_per_tick == 0) seconds_per_tick = 1;
 
-			// 2. LOGOVÁNÍ DO BLESKOVÉ PAMĚTI (Předáváme rovnou surové 3 bajty z payloadu)
-			Logger_SavePunch_Kontrola(payload, sub_sec, unix_time);
+		uint32_t ms_within_tick = ((prer_s - ssr) * 1000) / ssr_freq;
+		uint8_t sub_sec = (ms_within_tick % 1000) / 100; // Desetiny vteřiny (0-9)
 
-	    // Zpětná dešifrace
-	    uint8_t runner_type = (payload[0] >> 6) & 0x03;
-	    uint32_t runner_id = ((payload[0] & 0x3F) << 16) | (payload[1] << 8) | payload[2];
+		uint32_t cal_seconds = Get_Calendar_Seconds_Since_2000(&sDate, &sTime);
+		uint32_t real_seconds_since_2000 = (cal_seconds * seconds_per_tick) + (ms_within_tick / 1000);
+		uint32_t unix_time = 946684800 + real_seconds_since_2000;
 
-	    APP_DBG("ZAVODNIK ORAZIL! Typ: %d, ID: %lu", runner_type, runner_id);
+		// Zápis do kruhového bufferu s Erase-Ahead logikou
+		Logger_SavePunch_Kontrola(payload, sub_sec, unix_time);
+		}
+		else if (device_type == 0x01)
+		{
+			// =================================================================
+			// B) KONFIGURAČNÍ JEDNOTKA -> PŘEPNUTÍ DO BLE
+			// =================================================================
+			APP_DBG(">>> DETEKOVAN KONFIGURATOR! Hash ze vzduchu: %lu", received_id_or_hash);
 
-	    // Zde zavoláme funkci pro uložení do paměti (viz Krok 2)
+			// Přečteme si očekávaný hash z Flash paměti (maskujeme na 22 bitů pro jistotu)
+			uint32_t expected_hash = DEVICE_CONFIG->hash_device & 0x3FFFFF;
+
+			if (received_id_or_hash == expected_hash)
+			{
+				APP_DBG(">>> HASH SOUHLASI! INICIOVANO PREPNUTI DO BLE!");
+				// Vyvoláme úkol pro ukončení MAC a spuštění BLE
+				UTIL_SEQ_SetTask(1U << CFG_TASK_INIT_SWITCH_PROTOCOL, CFG_SCH_PRIO_0);
+			}
+			else
+			{
+				APP_DBG(">>> CHYBA BEZPECNOSTI: Neplatny konfigurační kód!");
+			}
+		}
 	}
-  BSP_LED_Toggle(LED_RED);
-  FrameOnGoing = FALSE;
+	BSP_LED_Toggle(LED_RED);
+	FrameOnGoing = FALSE;
 }
 
 MAC_Status_t APP_MAC_mcpsDataIndCb( const  MAC_dataInd_t * pDataInd )
