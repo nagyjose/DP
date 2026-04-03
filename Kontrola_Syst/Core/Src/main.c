@@ -119,6 +119,7 @@ int main( void )
 	snprintf(hw_ver_full, sizeof(hw_ver_full), "%s [%s]", HW_REV_BASE, git_hash);
 
 	Logger_Init(); // Najde, kde jsme před havárií přestali zapisovat
+	Config_Init();
 
 	while(1)
 	{

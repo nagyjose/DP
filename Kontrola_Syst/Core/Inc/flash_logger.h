@@ -20,6 +20,7 @@ typedef union {
 } ControlRecord_t;
 
 void Logger_Init(void);
+void Config_Init(void);
 void Logger_SavePunch_Kontrola(uint8_t* id_3bytes, uint8_t sub_sec, uint32_t unix_time);
 
 #endif /* FLASH_LOGGER_H */
