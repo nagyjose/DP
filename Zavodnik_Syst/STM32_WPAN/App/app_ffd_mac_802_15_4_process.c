@@ -201,6 +201,10 @@ void APP_MAC_ReceiveData(void)
 			sub_seconds = payload[1] & 0x0F;
 			unix_time = ((uint32_t)payload[2] << 24) | ((uint32_t)payload[3] << 16) |
 									((uint32_t)payload[4] << 8)  |  (uint32_t)payload[5];
+
+			// TÍMTO UKLIDNÍME KOMPILÁTOR (Příkaz nic nedělá, jen maže warning):
+			(void)sub_seconds;
+			(void)unix_time;
 		}
 
 		uint32_t current_tick = HAL_GetTick(); // Lokální čas procesoru v ms

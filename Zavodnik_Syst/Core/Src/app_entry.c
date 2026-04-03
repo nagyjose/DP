@@ -91,7 +91,7 @@ PLACE_IN_SECTION("MB_MEM2") ALIGN(4) static uint8_t SystemSpareEvtBuffer[sizeof(
 PLACE_IN_SECTION("MB_MEM2") ALIGN(4) char mac_802_15_4_CnfIndNot[C_SIZE_CMD_STRING];
 
 static SHCI_C2_CONCURRENT_Mode_Param_t ConcurrentMode = MAC_ENABLE;
-static uint8_t TS_ID1;
+//static uint8_t TS_ID1;
 
 
 /*----------------------------------------------------------------------------*/
@@ -181,8 +181,9 @@ static void Process_InitiateSwitchProtocol(void)
     /* start a timer */
     //HW_TS_Create(CFG_TIM_WAIT_BEFORE_SWITCH, &TS_ID1, hw_ts_SingleShot, ScheduleProcessSwitchProtocol);
 
-    HW_TS_Start(TS_ID1, SWITCH_TMO);
+    //HW_TS_Start(TS_ID1, SWITCH_TMO);
     APP_DBG("SWITCH PROTOCOL TO BLE");
+    ScheduleProcessSwitchProtocol();
   }
   else
   {

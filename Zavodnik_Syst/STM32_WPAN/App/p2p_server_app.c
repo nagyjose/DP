@@ -18,378 +18,131 @@
   */
 /* USER CODE END Header */
 
-/* Includes ------------------------------------------------------------------*/
-#include "app_common.h"
-#include "dbg_trace.h"
-#include "ble.h"
 #include "p2p_server_app.h"
-#include "stm32_seq.h"
+#include "dbg_trace.h"
+#include "app_conf.h"
+#include "ble.h"       // PŘIDÁNO: Definice BLE struktur
+#include "hci_tl.h"    // PŘIDÁNO: Nízkoúrovňové HCI pakety pro náš Parser
 
-/* Private includes ----------------------------------------------------------*/
-/* USER CODE BEGIN Includes */
+// --- NAŠE UNIKÁTNÍ UUID (128-bit) ---
+// Služba: ...FE40..., RX: ...FE41..., TX: ...FE42...
+#define COPY_SERVICE_UUID(uuid_struct) { \
+  (uuid_struct)[0]=0x19; (uuid_struct)[1]=0xed; (uuid_struct)[2]=0x82; (uuid_struct)[3]=0xae; \
+  (uuid_struct)[4]=0xed; (uuid_struct)[5]=0x21; (uuid_struct)[6]=0x4c; (uuid_struct)[7]=0x9d; \
+  (uuid_struct)[8]=0x41; (uuid_struct)[9]=0x45; (uuid_struct)[10]=0x22; (uuid_struct)[11]=0x8e; \
+  (uuid_struct)[12]=0x40; (uuid_struct)[13]=0xFE; (uuid_struct)[14]=0x00; (uuid_struct)[15]=0x00; }
 
-/* USER CODE END Includes */
+#define COPY_RX_UUID(uuid_struct) { (uuid_struct)[12]=0x41; (uuid_struct)[13]=0xFE; /* zbytek stejný */ }
+#define COPY_TX_UUID(uuid_struct) { (uuid_struct)[12]=0x42; (uuid_struct)[13]=0xFE; /* zbytek stejný */ }
 
-/* Private typedef -----------------------------------------------------------*/
-/* USER CODE BEGIN PTD */
- typedef struct{
-    uint8_t             Device_Led_Selection;
-    uint8_t             Led1;
- }P2P_LedCharValue_t;
+static uint16_t OrienteeringServiceHdle;
+static uint16_t RxCharHdle;
+static uint16_t TxCharHdle;
 
- typedef struct{
-    uint8_t             Device_Button_Selection;
-    uint8_t             ButtonStatus;
- }P2P_ButtonCharValue_t;
+// -----------------------------------------------------------------------------
+// CALLBACK: PARSER - Zde zpracováváme příkazy z Mobilu
+// -----------------------------------------------------------------------------
+static SVCCTL_EvtAckStatus_t Tunnel_Event_Handler(void *pckt) {
+	hci_uart_pckt *hci_pckt = (hci_uart_pckt *)pckt;
+	hci_event_pckt *event_pckt = (hci_event_pckt*)hci_pckt->data;
 
-typedef struct
-{
-  uint8_t               Notification_Status; /* used to check if P2P Server is enabled to Notify */
-  P2P_LedCharValue_t    LedControl;
-  P2P_ButtonCharValue_t ButtonControl;
-  uint16_t              ConnectionHandle;
-} P2P_Server_App_Context_t;
-/* USER CODE END PTD */
+	if (hci_pckt->type != HCI_EVENT_PKT_TYPE) return SVCCTL_EvtNotAck;
 
-/* Private defines ------------------------------------------------------------*/
-/* USER CODE BEGIN PD */
+	if (event_pckt->evt == HCI_VENDOR_SPECIFIC_DEBUG_EVT_CODE) {
+		evt_blecore_aci *blecore_evt = (evt_blecore_aci*)event_pckt->data;
 
-/* USER CODE END PD */
+		if (blecore_evt->ecode == ACI_GATT_ATTRIBUTE_MODIFIED_VSEVT_CODE) {
+			aci_gatt_attribute_modified_event_rp0 *mod = (aci_gatt_attribute_modified_event_rp0*)blecore_evt->data;
 
-/* Private macros -------------------------------------------------------------*/
-/* USER CODE BEGIN PM */
+			// Pokud mobil zapsal do RX charakteristiky
+			if (mod->Attr_Handle == (RxCharHdle + 1)) {
+				uint8_t cmd = mod->Attr_Data[0];
 
-/* USER CODE END PM */
+				// =============================================================
+				// ROZCESTNÍK PŘÍKAZŮ (COMMAND DICTIONARY)
+				// =============================================================
+				switch(cmd)
+				{
+					case 0x10: // CMD_READ_CONFIG
+						APP_DBG(">>> BLE CMD: READ CONFIG (0x10)");
 
-/* Private variables ---------------------------------------------------------*/
-/* USER CODE BEGIN PV */
-/**
- * START of Section BLE_APP_CONTEXT
- */
+						// Zatím pošleme prvních 100 bajtů z DEVICE_CONFIG z Flash
+						// Obsahuje: magic_word, kontrolni soucet, hw_verzi, jmeno atd.
+						BLE_Tunnel_Send((uint8_t*)DEVICE_CONFIG, 100);
+						break;
 
-static P2P_Server_App_Context_t P2P_Server_App_Context;
+					case 0x20: // CMD_DOWNLOAD_CURRENT
+						APP_DBG(">>> BLE CMD: DOWNLOAD CURRENT LOG (0x20)");
+						// TBD v další fázi
+						uint8_t ack_20[4] = {0x20, 0x01, 0x00, 0x00};
+						BLE_Tunnel_Send(ack_20, 4);
+						break;
 
-/**
- * END of Section BLE_APP_CONTEXT
- */
-/* USER CODE END PV */
+					case 0x40: // CMD_IDENTIFY (Najdi můj čip)
+						APP_DBG(">>> BLE CMD: IDENTIFY (0x40) - Zacinam blikat!");
+						// TBD: Můžeme zde zapnout bzučák nebo LED
+						break;
 
-/* Private function prototypes -----------------------------------------------*/
-/* USER CODE BEGIN PFP */
-static void P2PS_Send_Notification(void);
-static void P2PS_APP_LED_BUTTON_context_Init(void);
-/* USER CODE END PFP */
-
-/* Functions Definition ------------------------------------------------------*/
-void P2PS_STM_App_Notification(P2PS_STM_App_Notification_evt_t *pNotification)
-{
-/* USER CODE BEGIN P2PS_STM_App_Notification_1 */
-
-/* USER CODE END P2PS_STM_App_Notification_1 */
-  switch(pNotification->P2P_Evt_Opcode)
-  {
-/* USER CODE BEGIN P2PS_STM_App_Notification_P2P_Evt_Opcode */
-#if(BLE_CFG_OTA_REBOOT_CHAR != 0)
-    case P2PS_STM_BOOT_REQUEST_EVT:
-      APP_DBG_MSG("-- P2P APPLICATION SERVER : BOOT REQUESTED\n");
-      APP_DBG_MSG(" \n\r");
-
-      *(uint32_t*)SRAM1_BASE = *(uint32_t*)pNotification->DataTransfered.pPayload;
-      NVIC_SystemReset();
-      break;
-#endif
-/* USER CODE END P2PS_STM_App_Notification_P2P_Evt_Opcode */
-
-    case P2PS_STM__NOTIFY_ENABLED_EVT:
-/* USER CODE BEGIN P2PS_STM__NOTIFY_ENABLED_EVT */
-      P2P_Server_App_Context.Notification_Status = 1;
-      APP_DBG_MSG("-- P2P APPLICATION SERVER : NOTIFICATION ENABLED\n"); 
-      APP_DBG_MSG(" \n\r");
-/* USER CODE END P2PS_STM__NOTIFY_ENABLED_EVT */
-      break;
-
-    case P2PS_STM_NOTIFY_DISABLED_EVT:
-/* USER CODE BEGIN P2PS_STM_NOTIFY_DISABLED_EVT */
-      P2P_Server_App_Context.Notification_Status = 0;
-      APP_DBG_MSG("-- P2P APPLICATION SERVER : NOTIFICATION DISABLED\n");
-      APP_DBG_MSG(" \n\r");
-/* USER CODE END P2PS_STM_NOTIFY_DISABLED_EVT */
-      break;
-      
-    case P2PS_STM_WRITE_EVT:
-/* USER CODE BEGIN P2PS_STM_WRITE_EVT */
-      if(pNotification->DataTransfered.pPayload[0] == 0x00){ /* ALL Deviceselected - may be necessary as LB Routeur informs all connection */
-        if(pNotification->DataTransfered.pPayload[1] == 0x01)
-        {
-          BSP_LED_On(LED_RED);
-          APP_DBG_MSG("-- P2P APPLICATION SERVER  : LED1 ON\n"); 
-          APP_DBG_MSG(" \n\r");
-          P2P_Server_App_Context.LedControl.Led1=0x01; /* LED1 ON */
-        }
-        if(pNotification->DataTransfered.pPayload[1] == 0x00)
-        {
-          BSP_LED_Off(LED_RED);
-          APP_DBG_MSG("-- P2P APPLICATION SERVER  : LED1 OFF\n"); 
-          APP_DBG_MSG(" \n\r");
-          P2P_Server_App_Context.LedControl.Led1=0x00; /* LED1 OFF */
-        }
-      }
-#if(P2P_SERVER1 != 0)  
-      if(pNotification->DataTransfered.pPayload[0] == 0x01){ /* end device 1 selected - may be necessary as LB Routeur informs all connection */
-        if(pNotification->DataTransfered.pPayload[1] == 0x01)
-        {
-          BSP_LED_On(LED_RED);
-          APP_DBG_MSG("-- P2P APPLICATION SERVER 1 : LED1 ON\n"); 
-          APP_DBG_MSG(" \n\r");
-          P2P_Server_App_Context.LedControl.Led1=0x01; /* LED1 ON */
-        }
-        if(pNotification->DataTransfered.pPayload[1] == 0x00)
-        {
-          BSP_LED_Off(LED_RED);
-          APP_DBG_MSG("-- P2P APPLICATION SERVER 1 : LED1 OFF\n"); 
-          APP_DBG_MSG(" \n\r");
-          P2P_Server_App_Context.LedControl.Led1=0x00; /* LED1 OFF */
-        }
-        /* Switch to Mac */
-        if(pNotification->DataTransfered.pPayload[1] == 0x02)
-        {
-            BSP_LED_Off(LED_RED);
-            APP_DBG("SYSTEM: SWITCH TO MAC");
-            APP_DBG_MSG("-- P2P APPLICATION SERVER 1 : SWITCH TO MAC\n");
-            APP_DBG_MSG(" \n\r");
-            /* Set "Switch Protocol" Task */
-            UTIL_SEQ_SetTask(1<<CFG_TASK_INIT_SWITCH_PROTOCOL,CFG_SCH_PRIO_0);
-        }
-      }
-#endif
-#if(P2P_SERVER2 != 0)
-      if(pNotification->DataTransfered.pPayload[0] == 0x02){ /* end device 2 selected */ 
-        if(pNotification->DataTransfered.pPayload[1] == 0x01)
-        {
-          BSP_LED_On(LED_RED);
-           APP_DBG_MSG("-- P2P APPLICATION SERVER 2 : LED1 ON\n"); 
-          APP_DBG_MSG(" \n\r");
-          P2P_Server_App_Context.LedControl.Led1=0x01; /* LED1 ON */
-        }
-        if(pNotification->DataTransfered.pPayload[1] == 0x00)
-        {
-          BSP_LED_Off(LED_RED);
-          APP_DBG_MSG("-- P2P APPLICATION SERVER 2 : LED1 OFF\n"); 
-          APP_DBG_MSG(" \n\r");
-          P2P_Server_App_Context.LedControl.Led1=0x00; /* LED1 OFF */
-        }   
-      }
-#endif      
-#if(P2P_SERVER3 != 0)  
-      if(pNotification->DataTransfered.pPayload[0] == 0x03){ /* end device 3 selected - may be necessary as LB Routeur informs all connection */
-        if(pNotification->DataTransfered.pPayload[1] == 0x01)
-        {
-          BSP_LED_On(LED_RED);
-          APP_DBG_MSG("-- P2P APPLICATION SERVER 3 : LED1 ON\n"); 
-          APP_DBG_MSG(" \n\r");
-          P2P_Server_App_Context.LedControl.Led1=0x01; /* LED1 ON */
-        }
-        if(pNotification->DataTransfered.pPayload[1] == 0x00)
-        {
-          BSP_LED_Off(LED_RED);
-          APP_DBG_MSG("-- P2P APPLICATION SERVER 3 : LED1 OFF\n"); 
-          APP_DBG_MSG(" \n\r");
-          P2P_Server_App_Context.LedControl.Led1=0x00; /* LED1 OFF */
-        }
-      }
-#endif
-#if(P2P_SERVER4 != 0)
-      if(pNotification->DataTransfered.pPayload[0] == 0x04){ /* end device 4 selected */ 
-        if(pNotification->DataTransfered.pPayload[1] == 0x01)
-        {
-          BSP_LED_On(LED_RED);
-           APP_DBG_MSG("-- P2P APPLICATION SERVER 2 : LED1 ON\n"); 
-          APP_DBG_MSG(" \n\r");
-          P2P_Server_App_Context.LedControl.Led1=0x01; /* LED1 ON */
-        }
-        if(pNotification->DataTransfered.pPayload[1] == 0x00)
-        {
-          BSP_LED_Off(LED_RED);
-          APP_DBG_MSG("-- P2P APPLICATION SERVER 2 : LED1 OFF\n"); 
-          APP_DBG_MSG(" \n\r");
-          P2P_Server_App_Context.LedControl.Led1=0x00; /* LED1 OFF */
-        }   
-      }
-#endif     
-#if(P2P_SERVER5 != 0)  
-      if(pNotification->DataTransfered.pPayload[0] == 0x05){ /* end device 5 selected - may be necessary as LB Routeur informs all connection */
-        if(pNotification->DataTransfered.pPayload[1] == 0x01)
-        {
-          BSP_LED_On(LED_RED);
-          APP_DBG_MSG("-- P2P APPLICATION SERVER 5 : LED1 ON\n"); 
-          APP_DBG_MSG(" \n\r");
-          P2P_Server_App_Context.LedControl.Led1=0x01; /* LED1 ON */
-        }
-        if(pNotification->DataTransfered.pPayload[1] == 0x00)
-        {
-          BSP_LED_Off(LED_RED);
-          APP_DBG_MSG("-- P2P APPLICATION SERVER 5 : LED1 OFF\n"); 
-          APP_DBG_MSG(" \n\r");
-          P2P_Server_App_Context.LedControl.Led1=0x00; /* LED1 OFF */
-        }
-      }
-#endif
-#if(P2P_SERVER6 != 0)
-      if(pNotification->DataTransfered.pPayload[0] == 0x06){ /* end device 6 selected */ 
-        if(pNotification->DataTransfered.pPayload[1] == 0x01)
-        {
-          BSP_LED_On(LED_RED);
-           APP_DBG_MSG("-- P2P APPLICATION SERVER 6 : LED1 ON\n"); 
-          APP_DBG_MSG(" \n\r");
-          P2P_Server_App_Context.LedControl.Led1=0x01; /* LED1 ON */
-        }
-        if(pNotification->DataTransfered.pPayload[1] == 0x00)
-        {
-          BSP_LED_Off(LED_RED);
-          APP_DBG_MSG("-- P2P APPLICATION SERVER 6 : LED1 OFF\n"); 
-          APP_DBG_MSG(" \n\r");
-          P2P_Server_App_Context.LedControl.Led1=0x00; /* LED1 OFF */
-        }   
-      }
-#endif 
-/* USER CODE END P2PS_STM_WRITE_EVT */
-      break;
-
-    default:
-/* USER CODE BEGIN P2PS_STM_App_Notification_default */
-      
-/* USER CODE END P2PS_STM_App_Notification_default */
-      break;
-  }
-/* USER CODE BEGIN P2PS_STM_App_Notification_2 */
-
-/* USER CODE END P2PS_STM_App_Notification_2 */
-  return;
+					default:
+						APP_DBG(">>> BLE CMD: NEZNAMY PRIKAZ (0x%02X)", cmd);
+						uint8_t error_msg[2] = {0xEE, cmd}; // Error Echo
+						BLE_Tunnel_Send(error_msg, 2);
+						break;
+				}
+			}
+		}
+	}
+	return SVCCTL_EvtNotAck;
 }
 
+// -----------------------------------------------------------------------------
+// INICIALIZACE: Registrace Služeb do BLE Stacku
+// -----------------------------------------------------------------------------
+void P2PS_APP_Init(void) {
+    Char_UUID_t uuid;
+    
+    // Zaregistrujeme obsluhu událostí
+    SVCCTL_RegisterSvcHandler(Tunnel_Event_Handler);
+
+    // 1. Přidání Služby
+    COPY_SERVICE_UUID(uuid.Char_UUID_128);
+    aci_gatt_add_service(UUID_TYPE_128, (Service_UUID_t *) &uuid, PRIMARY_SERVICE, 7, &OrienteeringServiceHdle);
+
+    // 2. Přidání RX Charakteristiky (Mobil píše nám)
+    uuid.Char_UUID_128[12] = 0x41; // RX UUID
+    aci_gatt_add_char(OrienteeringServiceHdle, UUID_TYPE_128, &uuid, 244,
+                      CHAR_PROP_WRITE | CHAR_PROP_WRITE_WITHOUT_RESP,
+                      ATTR_PERMISSION_NONE, GATT_NOTIFY_ATTRIBUTE_WRITE, 10, 1, &RxCharHdle);
+
+    // 3. Přidání TX Charakteristiky (My posíláme mobilu přes Notifikace)
+    uuid.Char_UUID_128[12] = 0x42; // TX UUID
+    aci_gatt_add_char(OrienteeringServiceHdle, UUID_TYPE_128, &uuid, 244,
+                      CHAR_PROP_NOTIFY,
+                      ATTR_PERMISSION_NONE, GATT_DONT_NOTIFY_EVENTS, 10, 1, &TxCharHdle);
+
+    APP_DBG(">>> BLE TUNEL: Inicializovano a pripraveno!");
+}
+
+void BLE_Tunnel_Send(uint8_t *pPayload, uint16_t length) {
+    aci_gatt_update_char_value(OrienteeringServiceHdle, TxCharHdle, 0, length, pPayload);
+}
+
+// -----------------------------------------------------------------------------
+// CALLBACK: Stav připojení (Volá se z app_ble.c)
+// -----------------------------------------------------------------------------
 void P2PS_APP_Notification(P2PS_APP_ConnHandle_Not_evt_t *pNotification)
 {
-/* USER CODE BEGIN P2PS_APP_Notification_1 */
-
-/* USER CODE END P2PS_APP_Notification_1 */
-  switch(pNotification->P2P_Evt_Opcode)
-  {
-/* USER CODE BEGIN P2PS_APP_Notification_P2P_Evt_Opcode */
-
-/* USER CODE END P2PS_APP_Notification_P2P_Evt_Opcode */
-  case PEER_CONN_HANDLE_EVT :
-/* USER CODE BEGIN PEER_CONN_HANDLE_EVT */
-          
-/* USER CODE END PEER_CONN_HANDLE_EVT */
-    break;
-
-    case PEER_DISCON_HANDLE_EVT :
-/* USER CODE BEGIN PEER_DISCON_HANDLE_EVT */
-       P2PS_APP_LED_BUTTON_context_Init();       
-/* USER CODE END PEER_DISCON_HANDLE_EVT */
-    break;
-    
-    default:
-/* USER CODE BEGIN P2PS_APP_Notification_default */
-
-/* USER CODE END P2PS_APP_Notification_default */
-      break;
-  }
-/* USER CODE BEGIN P2PS_APP_Notification_2 */
-
-/* USER CODE END P2PS_APP_Notification_2 */
-  return;
+    switch (pNotification->P2P_Evt_Opcode)
+    {
+        case PEER_CONN_HANDLE_EVT:
+            APP_DBG(">>> BLE TUNEL: Mobil pripojen!");
+            break;
+        case PEER_DISCON_HANDLE_EVT:
+            APP_DBG(">>> BLE TUNEL: Mobil odpojen!");
+            break;
+        default:
+            break;
+    }
 }
 
-void P2PS_APP_Init(void)
-{
-/* USER CODE BEGIN P2PS_APP_Init */
-  UTIL_SEQ_RegTask( 1<< CFG_TASK_SW1_BUTTON_PUSHED_ID, UTIL_SEQ_RFU, P2PS_Send_Notification );
 
-  /**
-   * Initialize LedButton Service
-   */
-  P2P_Server_App_Context.Notification_Status=0; 
-  P2PS_APP_LED_BUTTON_context_Init();
-/* USER CODE END P2PS_APP_Init */
-  return;
-}
-
-/* USER CODE BEGIN FD */
-void P2PS_APP_LED_BUTTON_context_Init(void){
-  
-  BSP_LED_Off(LED_RED);
-  
-  #if(P2P_SERVER1 != 0)
-  P2P_Server_App_Context.LedControl.Device_Led_Selection=0x01; /* Device1 */
-  P2P_Server_App_Context.LedControl.Led1=0x00; /* led OFF */
-  P2P_Server_App_Context.ButtonControl.Device_Button_Selection=0x01;/* Device1 */
-  P2P_Server_App_Context.ButtonControl.ButtonStatus=0x00;
-#endif
-#if(P2P_SERVER2 != 0)
-  P2P_Server_App_Context.LedControl.Device_Led_Selection=0x02; /* Device2 */
-  P2P_Server_App_Context.LedControl.Led1=0x00; /* led OFF */
-  P2P_Server_App_Context.ButtonControl.Device_Button_Selection=0x02;/* Device2 */
-  P2P_Server_App_Context.ButtonControl.ButtonStatus=0x00;
-#endif  
-#if(P2P_SERVER3 != 0)
-  P2P_Server_App_Context.LedControl.Device_Led_Selection=0x03; /* Device3 */
-  P2P_Server_App_Context.LedControl.Led1=0x00; /* led OFF */
-  P2P_Server_App_Context.ButtonControl.Device_Button_Selection=0x03; /* Device3 */
-  P2P_Server_App_Context.ButtonControl.ButtonStatus=0x00;
-#endif
-#if(P2P_SERVER4 != 0)
-  P2P_Server_App_Context.LedControl.Device_Led_Selection=0x04; /* Device4 */
-  P2P_Server_App_Context.LedControl.Led1=0x00; /* led OFF */
-  P2P_Server_App_Context.ButtonControl.Device_Button_Selection=0x04; /* Device4 */
-  P2P_Server_App_Context.ButtonControl.ButtonStatus=0x00;
-#endif  
- #if(P2P_SERVER5 != 0)
-  P2P_Server_App_Context.LedControl.Device_Led_Selection=0x05; /* Device5 */
-  P2P_Server_App_Context.LedControl.Led1=0x00; /* led OFF */
-  P2P_Server_App_Context.ButtonControl.Device_Button_Selection=0x05; /* Device5 */
-  P2P_Server_App_Context.ButtonControl.ButtonStatus=0x00;
-#endif
-#if(P2P_SERVER6 != 0)
-  P2P_Server_App_Context.LedControl.Device_Led_Selection=0x06; /* device6 */
-  P2P_Server_App_Context.LedControl.Led1=0x00; /* led OFF */
-  P2P_Server_App_Context.ButtonControl.Device_Button_Selection=0x06; /* Device6 */
-  P2P_Server_App_Context.ButtonControl.ButtonStatus=0x00;
-#endif  
-}
-
-void P2PS_APP_SW1_Button_Action(void)
-{
-  UTIL_SEQ_SetTask( 1<<CFG_TASK_SW1_BUTTON_PUSHED_ID, CFG_SCH_PRIO_0);
-
-  return;
-}
-/* USER CODE END FD */
-
-/*************************************************************
- *
- * LOCAL FUNCTIONS
- *
- *************************************************************/
-/* USER CODE BEGIN FD_LOCAL_FUNCTIONS*/
-void P2PS_Send_Notification(void)
-{
- 
-  if(P2P_Server_App_Context.ButtonControl.ButtonStatus == 0x00){
-    P2P_Server_App_Context.ButtonControl.ButtonStatus=0x01;
-  } else {
-    P2P_Server_App_Context.ButtonControl.ButtonStatus=0x00;
-  }
-  
-   if(P2P_Server_App_Context.Notification_Status){ 
-    APP_DBG_MSG("-- P2P APPLICATION SERVER  : INFORM CLIENT BUTTON 1 PUSHED \n ");
-    APP_DBG_MSG(" \n\r");
-    P2PS_STM_App_Update_Char(P2P_NOTIFY_CHAR_UUID, (uint8_t *)&P2P_Server_App_Context.ButtonControl);
-   } else {
-    APP_DBG_MSG("-- P2P APPLICATION SERVER : CAN'T INFORM CLIENT -  NOTIFICATION DISABLED\n "); 
-   }
-
-  return;
-}
-
-/* USER CODE END FD_LOCAL_FUNCTIONS*/
