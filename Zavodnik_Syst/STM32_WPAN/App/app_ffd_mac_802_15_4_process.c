@@ -242,13 +242,22 @@ void APP_MAC_ReceiveData(void)
 			if (!is_spam)
 			{
 				if (control_id == CLEAR_CONTROL_ID) {
-					Logger_NewRace(payload); // <--- TADY JE TA ZMĚNA (Předáváme přímo payload)
+					Logger_NewRace(payload);
 					last_written_control_id = control_id;
 				} else {
 					uint8_t abs_rssi = (uint8_t)(-rssi);
 					int8_t teplota = Get_MCU_Temperature();
 					Logger_SavePunch(payload, abs_rssi, teplota);
 					last_written_control_id = control_id;
+
+					// =========================================================
+					// KROK 4: PŘEPNUTÍ DO BLE PŘI ORAŽENÍ CÍLE
+					// =========================================================
+					if (control_id == FINISH_CONTROL_ID) {
+						APP_DBG(">>> CIL ORAZEN -> INICIOVANO PREPNUTI DO BLE!");
+						// Vyvoláme úkol, který je definován v app_entry.c
+						UTIL_SEQ_SetTask(1U << CFG_TASK_INIT_SWITCH_PROTOCOL, CFG_SCH_PRIO_0);
+					}
 				}
 			}
 			else
