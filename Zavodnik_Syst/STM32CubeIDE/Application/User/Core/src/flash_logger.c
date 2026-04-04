@@ -451,3 +451,31 @@ void Logger_FormatAll(void)
 
 	APP_DBG("--- FORMATOVANI DOKONCENO, PAMET JE CISTA ---");
 }
+
+// -----------------------------------------------------------------------------
+// HROMADNÝ ZÁPIS KONFIGURACE (COMMIT z RAM)
+// -----------------------------------------------------------------------------
+void Config_Commit(RunnerConfig_t *new_cfg)
+{
+	// 1. Smažeme celou konfigurační stránku ve Flash
+	EraseConfigPage();
+
+	// 2. Projdeme celou strukturu z RAM a zapíšeme ji po 8 bajtech
+	uint8_t *data_ptr = (uint8_t*)new_cfg;
+	uint32_t flash_ptr = CONFIG_FLASH_ADDR;
+	uint32_t double_words_count = sizeof(RunnerConfig_t) / 8;
+
+	HAL_FLASH_Unlock();
+	__HAL_FLASH_CLEAR_FLAG(FLASH_FLAG_OPTVERR | FLASH_FLAG_EOP | FLASH_FLAG_WRPERR | FLASH_FLAG_PGSERR);
+
+	for (uint32_t i = 0; i < double_words_count; i++)
+	{
+		uint64_t double_word_to_write = 0;
+		memcpy(&double_word_to_write, data_ptr + (i * 8), 8);
+		HAL_FLASH_Program(FLASH_TYPEPROGRAM_DOUBLEWORD, flash_ptr, double_word_to_write);
+		flash_ptr += 8;
+	}
+	HAL_FLASH_Lock();
+
+	APP_DBG("CONFIG: Nova konfigurace byla uspesne vypalena do Flash!");
+}

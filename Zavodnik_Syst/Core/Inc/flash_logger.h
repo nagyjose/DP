@@ -2,6 +2,7 @@
 #define FLASH_LOGGER_H
 
 #include "stm32wbxx_hal.h"
+#include "app_conf.h"
 
 // --- KONFIGURACE PAMĚTI ---
 // Stránka 32 (0x08020000) je vyhrazená pro statická data uživatele (index 0)
@@ -17,6 +18,7 @@
 #define START_CONTROL_ID   2
 #define FINISH_CONTROL_ID  3
 
+
 // --- STRUKTURA ZÁZNAMU (Přesně 8 bajtů / 64 bitů) ---
 typedef union {
     uint64_t double_word;
@@ -26,6 +28,8 @@ typedef union {
         int8_t   temperature;    // 1 byte: Teplota procesoru (-128 až +127 °C)
     } __attribute__((packed)) data;
 } PunchRecord_t;
+
+
 // --- FUNKCE ---
 void Logger_Init(void);
 // Do funkce teď předáme jen ukazatel na surová data a RSSI
@@ -35,5 +39,7 @@ void Logger_NewRace(uint8_t* raw_clear_payload);
 // PŘIDÁNO: Funkce pro vyčítání dat do BLE Tunelu
 void Logger_GetDownloadData(uint8_t cmd, uint8_t param, uint8_t **start_ptr, uint32_t *len);
 void Logger_FormatAll(void);
+void Config_Commit(RunnerConfig_t *new_cfg);
+
 
 #endif /* FLASH_LOGGER_H */

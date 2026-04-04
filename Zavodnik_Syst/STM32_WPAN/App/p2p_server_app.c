@@ -15,6 +15,7 @@
 #include "hci_tl.h"
 #include "stm32_seq.h"
 #include "flash_logger.h"
+#include <stdbool.h>
 
 // --- NAŠE UNIKÁTNÍ UUID (128-bit) ---
 #define COPY_SERVICE_UUID(uuid_struct) { \
@@ -38,6 +39,12 @@ static uint32_t chunk_rem_len = 0;       // Kolik bajtů nám ještě zbývá od
 static uint8_t  chunk_active_cmd = 0;    // Jaký příkaz se zrovna vykonává
 
 #define CHUNK_MAX_SIZE 20 // Maximální velikost jedné rány (BLE MTU to bezpečně snese)
+
+// =============================================================================
+// STAVOVÉ PROMĚNNÉ PRO RELACI (SESSION & STAGING)
+// =============================================================================
+static bool is_unlocked = false;           // Stav zámku (Odemčeno / Zamčeno)
+static RunnerConfig_t staged_config;       // RAM kopie konfigurace pro úpravy
 
 // =============================================================================
 // FUNKCE KRÁJEČE (Volá se asynchronně přes Sequencer)
@@ -170,45 +177,120 @@ static SVCCTL_EvtAckStatus_t Tunnel_Event_Handler(void *pckt)
 							// TBD: Zapnout LED/Buzzer task
 							break;
 
-						case 0x99: // CMD_FORMAT_MEMORY (Nyní chráněno heslem!)
-						{
-								APP_DBG(">>> BLE CMD: Pozadavek na FORMAT (0x99)");
+						// =====================================================
+						// 1. ODEMČENÍ RELACE (0x05)
+						// Paket: [0x05] [PIN_1] [PIN_2] [PIN_3] [PIN_4]
+						// =====================================================
+						case 0x05:
+							if (mod->Attr_Data_Length >= 5) {
+								uint32_t pin = ((uint32_t)mod->Attr_Data[1] << 24) | ((uint32_t)mod->Attr_Data[2] << 16) |
+															 ((uint32_t)mod->Attr_Data[3] << 8)  |  (uint32_t)mod->Attr_Data[4];
 
-								// 1. Ochrana: Mobil poslal příliš krátkou zprávu (chybí heslo)
-								if (mod->Attr_Data_Length < 5) {
-										APP_DBG(">>> BLE SECURITY: Prikaz zamitnut - chybi heslo!");
-										uint8_t ack_err[4] = {0x99, 0xEE, 0x00, 0x00}; // EE = Error
-										BLE_Tunnel_Send(ack_err, 4);
+								if (pin == DEVICE_CONFIG->comp_device_hash) {
+									is_unlocked = true;
+									// Zkopírujeme aktuální stav z Flash do naší RAM (Stagingu)
+									memcpy(&staged_config, (void*)DEVICE_CONFIG, sizeof(RunnerConfig_t));
+									APP_DBG(">>> BLE SECURITY: ODEMCENO! Relace spustena.");
+									uint8_t ack[4] = {0x05, 0x01, 0x00, 0x00}; BLE_Tunnel_Send(ack, 4);
+								} else {
+									APP_DBG(">>> BLE SECURITY: Spatny PIN!");
+									uint8_t ack[4] = {0x05, 0xEE, 0x00, 0x00}; BLE_Tunnel_Send(ack, 4);
+								}
+							}
+							break;
+
+						// =====================================================
+						// 2. ZAMČENÍ RELACE (0x06)
+						// Paket: [0x06]
+						// =====================================================
+						case 0x06:
+							is_unlocked = false;
+							memset(&staged_config, 0, sizeof(RunnerConfig_t)); // Bezpečný výmaz RAM
+							APP_DBG(">>> BLE SECURITY: ZAMCENO uzivatelem.");
+							uint8_t ack_lock[4] = {0x06, 0x01, 0x00, 0x00}; BLE_Tunnel_Send(ack_lock, 4);
+							break;
+
+						// =====================================================
+						// 3. POSTUPNÉ SKLÁDÁNÍ DO RAM (0x12 - STAGE PARAMETER)
+						// Paket: [0x12] [ID] [Offset_H] [Offset_L] [Data...]
+						// =====================================================
+						case 0x12:
+							if (!is_unlocked) {
+								APP_DBG(">>> BLE SECURITY: Zamitnuto (ZAMCENO)");
+								uint8_t ack[4] = {0x12, 0xEE, 0x00, 0x00}; BLE_Tunnel_Send(ack, 4);
+								break;
+							}
+
+							if (mod->Attr_Data_Length >= 5) {
+								uint8_t param_id = mod->Attr_Data[1];
+								uint16_t offset = (mod->Attr_Data[2] << 8) | mod->Attr_Data[3];
+								uint8_t data_len = mod->Attr_Data_Length - 4;
+								uint8_t *payload = &mod->Attr_Data[4];
+
+								APP_DBG(">>> BLE STAGE: Param 0x%02X, Offset: %d, Delka: %d", param_id, offset, data_len);
+
+								// Úprava konkrétních proměnných v RAM (s ochranou proti přetečení bufferu)
+								switch (param_id) {
+									case 0x01: // Jméno (Max 64 B)
+										if (offset + data_len <= 64) memcpy(&staged_config.comp_name[offset], payload, data_len);
+										break;
+									case 0x02: // Národnost (Max 8 B)
+										if (offset + data_len <= 8) memcpy(&staged_config.comp_nationality[offset], payload, data_len);
+										break;
+									case 0x03: // Bzučák (1 B)
+										if (data_len >= 1) staged_config.buzzer_onoff = payload[0];
+										break;
+									case 0x04: // Nový PIN (4 B)
+										if (data_len >= 4) {
+												staged_config.comp_device_hash = ((uint32_t)payload[0] << 24) | ((uint32_t)payload[1] << 16) |
+																												 ((uint32_t)payload[2] << 8)  |  (uint32_t)payload[3];
+										}
+										break;
+									// Tady si v budoucnu přidáš např. case 0x05: // Anamnéza (Max 1024 B)
+								}
+
+								uint8_t ack[4] = {0x12, 0x01, param_id, 0x00}; BLE_Tunnel_Send(ack, 4);
+							}
+							break;
+
+						// =====================================================
+						// 4. HROMADNÝ ZÁPIS DO FLASH (0x13 - COMMIT)
+						// Paket: [0x13]
+						// =====================================================
+						case 0x13:
+								if (!is_unlocked) {
+										uint8_t ack[4] = {0x13, 0xEE, 0x00, 0x00}; BLE_Tunnel_Send(ack, 4);
 										break;
 								}
 
-								// 2. Extrakce hesla z přijaté zprávy (Bajty 1 až 4)
-								uint32_t received_pin = ((uint32_t)mod->Attr_Data[1] << 24) |
-																				((uint32_t)mod->Attr_Data[2] << 16) |
-																				((uint32_t)mod->Attr_Data[3] << 8)  |
-																				 (uint32_t)mod->Attr_Data[4];
+								APP_DBG(">>> BLE COMMIT: Zapisuji vsechny RAM upravy do Flash!");
+								Config_Commit(&staged_config);
 
-								// 3. Porovnání s uloženým heslem ve Flash paměti
-								if (received_pin == DEVICE_CONFIG->comp_device_hash) {
-										APP_DBG(">>> BLE SECURITY: Heslo OK. Spoustim mazani!");
+								uint8_t ack_com[4] = {0x13, 0x01, 0x00, 0x00}; BLE_Tunnel_Send(ack_com, 4);
+								break;
 
-										chunk_rem_len = 0; // Zastavení případného stahování
-										Logger_FormatAll();
-
-										uint8_t ack_ok[4] = {0x99, 0x01, 0x00, 0x00}; // 01 = Úspěch
-										BLE_Tunnel_Send(ack_ok, 4);
-								} else {
-										APP_DBG(">>> BLE SECURITY: SPATNE HESLO! (Prijato: %lu)", received_pin);
-										uint8_t ack_err[4] = {0x99, 0xEE, 0x00, 0x00};
-										BLE_Tunnel_Send(ack_err, 4);
+						// =====================================================
+						// 5. BEZPEČNÝ FORMÁT PAMĚTI (0x99)
+						// Nyní nevyžaduje PIN v paketu, protože je chráněn zámkem!
+						// =====================================================
+						case 0x99:
+								if (!is_unlocked) {
+										APP_DBG(">>> BLE SECURITY: Zamitnuto - Formát vyžaduje odemknuti!");
+										uint8_t ack[4] = {0x99, 0xEE, 0x00, 0x00}; BLE_Tunnel_Send(ack, 4);
+										break;
 								}
+
+								APP_DBG(">>> BLE CMD: FORMATOVANI PAMETI ZAVODNIKA! (0x99)");
+								chunk_rem_len = 0;
+								Logger_FormatAll();
+								uint8_t ack_fmt[4] = {0x99, 0x01, 0x00, 0x00}; BLE_Tunnel_Send(ack_fmt, 4);
 								break;
 						}
 
 						default:
 							APP_DBG(">>> BLE CMD: NEZNAMY PRIKAZ (0x%02X)", cmd);
 							break;
-					}
+
 				}
 				break;
 			}
@@ -266,6 +348,11 @@ void P2PS_APP_Notification(P2PS_APP_ConnHandle_Not_evt_t *pNotification)
 			APP_DBG(">>> BLE TUNEL: Mobil odpojen!");
 			// Pokud se mobil utrhne uprostřed stahování, natvrdo ho zrušíme
 			chunk_rem_len = 0;
+
+			// BEZPEČNOST: Automaticky zamknout a smazat RAM buffer
+			is_unlocked = false;
+			memset(&staged_config, 0, sizeof(RunnerConfig_t));
+			APP_DBG(">>> BLE SECURITY: Spojeni ztraceno -> AUTO-LOCK aktivovan!");
 			break;
 		default:
 			break;
