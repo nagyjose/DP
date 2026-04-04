@@ -281,11 +281,42 @@ static void Config_FactoryReset(void)
 }
 
 // =============================================================================
-// HLAVNÍ INICIALIZACE (Voláno z main.c)
+// HLAVNÍ INICIALIZACE A ZÁCHRANNÝ RESET (Voláno z main.c)
 // =============================================================================
 void Config_Init(void)
 {
-	// Zkontrolujeme, zda struktura ve Flash obsahuje naše magické slovo
+	// 1. ZÁCHRANNÁ BRZDA: Kontrola tlačítka SW1 při startu desky
+	// Pokud je tlačítko stisknuto během bootování (hodnota 0 nebo 1 dle zapojení,
+	// použijeme standardní BSP funkci), provedeme tvrdý formát konfigurace.
+	if (BSP_PB_GetState(BUTTON_SW3) == 1 || BSP_PB_GetState(BUTTON_SW3) == 0)
+	{
+		// Krátká prodleva pro odfiltrování zákmitů
+		HAL_Delay(50);
+		if (BSP_PB_GetState(BUTTON_SW1) == 1 || BSP_PB_GetState(BUTTON_SW3) == 0) // Zkontroluj reálný stav sepnutí na tvé desce (obvykle 1)
+		{
+			// PRO JISTOTU KONTROLUJEME PŘESNÝ STAV:
+			// Pokud BSP_PB_GetState vrací při stisku 1, uprav podmínku výše na == 1
+		}
+	}
+
+	// Tady je vylepšená 100% spolehlivá detekce držení tlačítka po dobu 3 vteřin:
+	uint8_t hold_time = 0;
+	// Předpokládáme, že stisknuté tlačítko vrací 1 (pokud ne, změň na 0)
+	while(BSP_PB_GetState(BUTTON_SW3) == 1) {
+		HAL_Delay(100);
+		hold_time++;
+		if(hold_time > 30) { // 30 * 100ms = 3 vteřiny
+			APP_DBG(">>> SECURITY: DETEKOVAN ZACHRANNY RESET TLACITKEM! <<<");
+			Config_FactoryReset(); // Smaže konfiguraci a vrátí PIN na 123456
+
+			// Zablikáme pro potvrzení
+			for(int i=0; i<10; i++) { BSP_LED_Toggle(LED_RED); HAL_Delay(50); }
+			BSP_LED_Off(LED_RED);
+			break;
+		}
+	}
+
+	// 2. Standardní kontrola magického slova
 	if (DEVICE_CONFIG->magic_word != 0xCAFECAFE)
 	{
 		APP_DBG("CONFIG: Pamet neznama nebo poskozena!");
@@ -294,7 +325,7 @@ void Config_Init(void)
 	else
 	{
 		APP_DBG("CONFIG: Nacteno OK. Zavodnik: %s (ID: %lu)",
-						 DEVICE_CONFIG->comp_name, DEVICE_CONFIG->comp_device_id);
+										 DEVICE_CONFIG->comp_name, DEVICE_CONFIG->comp_device_id);
 	}
 }
 

@@ -47,6 +47,22 @@ static bool is_unlocked = false;           // Stav zámku (Odemčeno / Zamčeno)
 static RunnerConfig_t staged_config;       // RAM kopie konfigurace pro úpravy
 
 // =============================================================================
+// KRYPTOGRAFIE (Challenge-Response)
+// =============================================================================
+static uint32_t current_challenge = 0; // Paměť pro aktuálně vygenerovanou výzvu
+
+// Murmur3 Avalanche Hash (Jednoduchá, ale velmi silná míchací funkce)
+static uint32_t Generate_Response(uint32_t challenge, uint32_t pin) {
+    uint32_t mix = challenge ^ pin; // Smícháme výzvu s tajným heslem
+    mix ^= mix >> 16;
+    mix *= 0x85ebca6b;
+    mix ^= mix >> 13;
+    mix *= 0xc2b2ae35;
+    mix ^= mix >> 16;
+    return mix; // Výsledný Hash (Response)
+}
+
+// =============================================================================
 // FUNKCE KRÁJEČE (Volá se asynchronně přes Sequencer)
 // =============================================================================
 void BLE_Chunker_Task(void)
@@ -178,23 +194,56 @@ static SVCCTL_EvtAckStatus_t Tunnel_Event_Handler(void *pckt)
 							break;
 
 						// =====================================================
-						// 1. ODEMČENÍ RELACE (0x05)
-						// Paket: [0x05] [PIN_1] [PIN_2] [PIN_3] [PIN_4]
+						// 1A. KROK 1: MOBIL ŽÁDÁ O VÝZVU (0x05)
+						// Paket z mobilu: [0x05]
 						// =====================================================
 						case 0x05:
-							if (mod->Attr_Data_Length >= 5) {
-								uint32_t pin = ((uint32_t)mod->Attr_Data[1] << 24) | ((uint32_t)mod->Attr_Data[2] << 16) |
-															 ((uint32_t)mod->Attr_Data[3] << 8)  |  (uint32_t)mod->Attr_Data[4];
+							// Vygenerujeme náhodné číslo (Využijeme ticky procesoru a UDN čipu)
+							current_challenge = HAL_GetTick() ^ DEVICE_CONFIG->magic_word ^ LL_FLASH_GetUDN();
 
-								if (pin == DEVICE_CONFIG->comp_device_hash) {
+							// Pokud by náhodou vyšla nula (neplatná výzva), změníme ji
+							if (current_challenge == 0) current_challenge = 0xDEADBEEF;
+
+							APP_DBG(">>> BLE SECURITY: Generuji vyzvu: %lu", current_challenge);
+
+							// Odešleme výzvu do mobilu (0x05 + 4 bajty výzvy)
+							uint8_t ack_chal[5] = {0x05,
+																		(current_challenge >> 24) & 0xFF,
+																		(current_challenge >> 16) & 0xFF,
+																		(current_challenge >> 8)  & 0xFF,
+																		 current_challenge        & 0xFF};
+							BLE_Tunnel_Send(ack_chal, 5);
+							break;
+
+						// =====================================================
+						// 1B. KROK 2: MOBIL POSÍLÁ RESPONSE K OVĚŘENÍ (0x07)
+						// Paket z mobilu: [0x07] [Resp_1] [Resp_2] [Resp_3] [Resp_4]
+						// =====================================================
+						case 0x07:
+							if (mod->Attr_Data_Length >= 5) {
+								// Přečteme Response od mobilu
+								uint32_t received_response = ((uint32_t)mod->Attr_Data[1] << 24) |
+																						 ((uint32_t)mod->Attr_Data[2] << 16) |
+																						 ((uint32_t)mod->Attr_Data[3] << 8)  |
+																							(uint32_t)mod->Attr_Data[4];
+
+								// Vypočítáme si, co měl mobil reálně poslat
+								uint32_t expected_response = Generate_Response(current_challenge, DEVICE_CONFIG->comp_device_hash);
+
+								// Ověření! (Zároveň kontrolujeme, že výzva byla vůbec vygenerována)
+								if (received_response == expected_response && current_challenge != 0) {
 									is_unlocked = true;
+									current_challenge = 0; // Výzva se smí použít jen jednou! (Obrana proti replay)
+
 									// Zkopírujeme aktuální stav z Flash do naší RAM (Stagingu)
 									memcpy(&staged_config, (void*)DEVICE_CONFIG, sizeof(RunnerConfig_t));
-									APP_DBG(">>> BLE SECURITY: ODEMCENO! Relace spustena.");
-									uint8_t ack[4] = {0x05, 0x01, 0x00, 0x00}; BLE_Tunnel_Send(ack, 4);
+
+									APP_DBG(">>> BLE SECURITY: ODEMCENO! Hash sedi. Relace spustena.");
+									uint8_t ack[4] = {0x07, 0x01, 0x00, 0x00}; BLE_Tunnel_Send(ack, 4);
 								} else {
-									APP_DBG(">>> BLE SECURITY: Spatny PIN!");
-									uint8_t ack[4] = {0x05, 0xEE, 0x00, 0x00}; BLE_Tunnel_Send(ack, 4);
+									APP_DBG(">>> BLE SECURITY: SPATNA ODPOVED! Utocnik?");
+									current_challenge = 0; // Při chybě výzvu okamžitě spálíme
+									uint8_t ack[4] = {0x07, 0xEE, 0x00, 0x00}; BLE_Tunnel_Send(ack, 4);
 								}
 							}
 							break;
@@ -216,9 +265,9 @@ static SVCCTL_EvtAckStatus_t Tunnel_Event_Handler(void *pckt)
 						// =====================================================
 						case 0x12:
 							if (!is_unlocked) {
-								APP_DBG(">>> BLE SECURITY: Zamitnuto (ZAMCENO)");
-								uint8_t ack[4] = {0x12, 0xEE, 0x00, 0x00}; BLE_Tunnel_Send(ack, 4);
-								break;
+									APP_DBG(">>> BLE SECURITY: Zamitnuto (ZAMCENO)");
+									uint8_t ack[4] = {0x12, 0xEE, 0x00, 0x00}; BLE_Tunnel_Send(ack, 4);
+									break;
 							}
 
 							if (mod->Attr_Data_Length >= 5) {
@@ -229,24 +278,42 @@ static SVCCTL_EvtAckStatus_t Tunnel_Event_Handler(void *pckt)
 
 								APP_DBG(">>> BLE STAGE: Param 0x%02X, Offset: %d, Delka: %d", param_id, offset, data_len);
 
-								// Úprava konkrétních proměnných v RAM (s ochranou proti přetečení bufferu)
+								// Úprava konkrétních proměnných v RAM (s ochranou délky)
 								switch (param_id) {
-									case 0x01: // Jméno (Max 64 B)
-										if (offset + data_len <= 64) memcpy(&staged_config.comp_name[offset], payload, data_len);
+									// --- 1. ZÁKLADNÍ / VYSÍLANÉ INFORMACE ---
+									case 0x01: if (offset + data_len <= 32) memcpy(&staged_config.BLE_device_name[offset], payload, data_len); break;
+									case 0x02: if (data_len >= 1) staged_config.comp_device_type = payload[0]; break;
+									case 0x03: if (data_len >= 4) staged_config.comp_device_id = ((uint32_t)payload[0]<<24) | ((uint32_t)payload[1]<<16) | ((uint32_t)payload[2]<<8) | payload[3]; break;
+									case 0x04: if (data_len >= 4) staged_config.comp_device_hash = ((uint32_t)payload[0]<<24) | ((uint32_t)payload[1]<<16) | ((uint32_t)payload[2]<<8) | payload[3]; break;
+
+									// --- 2. ROZHODOVACÍ PARAMETRY ---
+									case 0x05: if (data_len >= 2) staged_config.cooldown_ms = ((uint16_t)payload[0]<<8) | payload[1]; break;
+									case 0x06: if (data_len >= 1) staged_config.required_hits = payload[0]; break;
+									case 0x07: if (data_len >= 1) staged_config.num_hits = payload[0]; break;
+									case 0x08: if (data_len >= 1) staged_config.buzzer_onoff = payload[0]; break;
+
+									// --- 3. INFORMACE O ZÁVODNÍKOVI ---
+									case 0x09: if (offset + data_len <= 64) memcpy(&staged_config.comp_name[offset], payload, data_len); break;
+									case 0x0A: if (offset + data_len <= 4)  memcpy(&staged_config.comp_nationality[offset], payload, data_len); break;
+									case 0x0B: if (data_len >= 4) staged_config.comp_birthday_date = ((uint32_t)payload[0]<<24) | ((uint32_t)payload[1]<<16) | ((uint32_t)payload[2]<<8) | payload[3]; break;
+									case 0x0C: if (offset + data_len <= 64) memcpy(&staged_config.comp_email[offset], payload, data_len); break;
+									case 0x0D: if (offset + data_len <= 16) memcpy(&staged_config.comp_telephone[offset], payload, data_len); break;
+									case 0x0E: if (offset + data_len <= 128) memcpy(&staged_config.comp_address[offset], payload, data_len); break;
+									case 0x0F: if (offset + data_len <= 8)  memcpy(&staged_config.comp_registration[offset], payload, data_len); break;
+									case 0x10: if (data_len >= 4) staged_config.comp_iofid = ((uint32_t)payload[0]<<24) | ((uint32_t)payload[1]<<16) | ((uint32_t)payload[2]<<8) | payload[3]; break;
+									case 0x11: if (data_len >= 4) staged_config.comp_orisid = ((uint32_t)payload[0]<<24) | ((uint32_t)payload[1]<<16) | ((uint32_t)payload[2]<<8) | payload[3]; break;
+									case 0x12: if (offset + data_len <= 64) memcpy(&staged_config.comp_team_1[offset], payload, data_len); break;
+									case 0x13: if (offset + data_len <= 64) memcpy(&staged_config.comp_team_2[offset], payload, data_len); break;
+									case 0x14: if (offset + data_len <= 64) memcpy(&staged_config.comp_team_3[offset], payload, data_len); break;
+
+									// --- 4. DLOUHÉ TEXTY (Tady využijeme offset naplno!) ---
+									case 0x15: if (offset + data_len <= 512) memcpy(&staged_config.comp_medical_info[offset], payload, data_len); break;
+									case 0x16: if (offset + data_len <= 512) memcpy(&staged_config.comp_other_info[offset], payload, data_len); break;
+
+									default:
+										APP_DBG(">>> BLE STAGE: Neznamy parametr (0x%02X)", param_id);
+										uint8_t ack_err[4] = {0x12, 0xEE, param_id, 0x00}; BLE_Tunnel_Send(ack_err, 4);
 										break;
-									case 0x02: // Národnost (Max 8 B)
-										if (offset + data_len <= 8) memcpy(&staged_config.comp_nationality[offset], payload, data_len);
-										break;
-									case 0x03: // Bzučák (1 B)
-										if (data_len >= 1) staged_config.buzzer_onoff = payload[0];
-										break;
-									case 0x04: // Nový PIN (4 B)
-										if (data_len >= 4) {
-												staged_config.comp_device_hash = ((uint32_t)payload[0] << 24) | ((uint32_t)payload[1] << 16) |
-																												 ((uint32_t)payload[2] << 8)  |  (uint32_t)payload[3];
-										}
-										break;
-									// Tady si v budoucnu přidáš např. case 0x05: // Anamnéza (Max 1024 B)
 								}
 
 								uint8_t ack[4] = {0x12, 0x01, param_id, 0x00}; BLE_Tunnel_Send(ack, 4);
