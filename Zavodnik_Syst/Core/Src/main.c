@@ -360,11 +360,11 @@ void HAL_Delay(uint32_t Delay)
 /* TÍMTO PŘEPÍŠEME SKRYTOU TOVÁRNÍ FUNKCI PRO SPÁNEK */
 void UTIL_SEQ_Idle(void)
 {
-	// 1. Nakrmíme psa pokaždé, když systém nemá co dělat.
-	HAL_IWDG_Refresh(&hiwdg);
+	// 1. Nakrmíme psa pokaždé, když procesor procitne.
+		HAL_IWDG_Refresh(&hiwdg);
 
-	// 2. Tím, že zde není žádné __WFI(), procesor M4 už NIKDY neusne.
-	// Bude neustále rotovat na 64 MHz, plně připravený okamžitě zachytit
-	// paket od Kontroly i z velké dálky, aniž by se kdykoliv resetoval!
+		// 2. Procesor M4 přejde do režimu Sleep.
+		// Bude probuzen jakýmkoliv přerušením (včetně 1ms SysTicku nebo zprávy od rádia M0+).
+		__WFI();
 }
 

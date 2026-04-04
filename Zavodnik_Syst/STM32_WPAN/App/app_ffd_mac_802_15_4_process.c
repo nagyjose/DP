@@ -118,6 +118,72 @@ void System_Signalize_Start(uint8_t seconds)
 }
 
 // =============================================================================
+// STAVOVÝ AUTOMAT ZÁVODNÍKA (WAKE-ON-RADIO / SNIFFING)
+// =============================================================================
+typedef enum {
+	STATE_IDLE,      // Režim "Sklad" - Děláme 30ms Sniffing každou vteřinu
+	STATE_RACING,    // Režim "Závod" - Trvalý příjem zapnut
+	STATE_FINISHED   // Režim "Cíl" - Závod ukončen, MAC rádio vypnuto
+} RaceState_t;
+
+static RaceState_t current_race_state = STATE_IDLE;
+uint8_t SniffTimerId;
+uint8_t SleepTimerId;
+
+// 1. BEZPEČNÉ CALLBACKY PRO ČASOVAČE (Běží v ISR - jen zařadí úkol do fronty)
+static void SniffTimer_Callback(void) {
+    UTIL_SEQ_SetTask(1 << CFG_TASK_MAC_SNIFF, CFG_SCH_PRIO_0);
+}
+static void SleepTimer_Callback(void) {
+    UTIL_SEQ_SetTask(1 << CFG_TASK_MAC_SLEEP, CFG_SCH_PRIO_0);
+}
+
+// Pomocná funkce pro rychlé přepnutí přijímače MAC vrstvy
+static void MAC_Set_RX_State(bool turn_on)
+{
+	MAC_setReq_t setReq;
+	uint8_t pib_val = turn_on ? g_TRUE : g_FALSE;
+	setReq.PIB_attribute = g_MAC_RX_ON_WHEN_IDLE_c;
+	setReq.PIB_attribute_valuePtr = &pib_val;
+	MAC_MLMESetReq(&setReq);
+
+	// !!! KRITICKÉ: Musíme počkat, až to koprocesor zpracuje !!!
+	UTIL_SEQ_WaitEvt(1U << CFG_EVT_SET_CNF);
+}
+
+// Úkol: Uspi rádio (Voláno 30 ms po probuzení)
+void APP_MAC_SleepTask(void) {
+	if (current_race_state == STATE_IDLE) {
+		MAC_Set_RX_State(false);
+	}
+}
+
+// Úkol: Probuď rádio (Voláno každých 1000 ms)
+void APP_MAC_SniffTask(void) {
+	if (current_race_state == STATE_IDLE) {
+		MAC_Set_RX_State(true);
+		// Spustíme odpočet 30 ms, po kterých rádio zase usne
+		HW_TS_Start(SleepTimerId, (uint32_t)(30 * 1000 / CFG_TS_TICK_VAL));
+	}
+	// Znovu natáhneme budík na další vteřinu (Kruhový běh)
+	HW_TS_Start(SniffTimerId, (uint32_t)(1000 * 1000 / CFG_TS_TICK_VAL));
+}
+
+// Hlavní inicializace (Voláno při startu desky)
+void Race_StateMachine_Init(void)
+{
+	// Předáváme BEZPEČNÉ callbacky, nikoliv přímo Tasky!
+	HW_TS_Create(CFG_TIM_PROC_ID_ISR, &SniffTimerId, hw_ts_SingleShot, SniffTimer_Callback);
+	HW_TS_Create(CFG_TIM_PROC_ID_ISR, &SleepTimerId, hw_ts_SingleShot, SleepTimer_Callback);
+
+	current_race_state = STATE_IDLE;
+	APP_DBG(">>> RACE STATE: IDLE (Sniffing na 30ms aktivovan) <<<");
+
+	// První kopnutí, které roztočí nekonečný cyklus
+	UTIL_SEQ_SetTask(1 << CFG_TASK_MAC_SNIFF, CFG_SCH_PRIO_0);
+}
+
+// =============================================================================
 // FUNKCE PRO MĚŘENÍ TEPLOTY (INTERNÍ ADC STM32)
 // =============================================================================
 extern ADC_HandleTypeDef hadc1; // Zpřístupníme ADC z main.c, pokud ho tam CubeMX generuje
@@ -355,16 +421,27 @@ void APP_MAC_ReceiveData(void)
 				if (control_id == CLEAR_CONTROL_ID) {
 					Logger_NewRace(payload);
 					last_written_control_id = control_id;
+
+					// --- START ZÁVODU: TRVALE ZAPNEME RÁDIO ---
+					if (current_race_state != STATE_RACING) {
+						current_race_state = STATE_RACING;
+						MAC_Set_RX_State(true);
+						APP_DBG(">>> RACE STATE: RACING (Trvaly prijem ZAPNUT) <<<");
+					}
 				} else {
 					uint8_t abs_rssi = (uint8_t)(-rssi);
 					int8_t teplota = Get_MCU_Temperature();
 					Logger_SavePunch(payload, abs_rssi, teplota);
 					last_written_control_id = control_id;
 
-					// PŘEPNUTÍ DO BLE PŘI ORAŽENÍ CÍLE [cite: 188, 221, 222]
+					// --- CÍL ZÁVODU: USPNEME RÁDIO A NECHÁME JEN BLE ---
 					if (control_id == FINISH_CONTROL_ID) {
-						APP_DBG(">>> CIL ORAZEN -> INICIOVANO PREPNUTI DO BLE!");
-						UTIL_SEQ_SetTask(1U << CFG_TASK_INIT_SWITCH_PROTOCOL, CFG_SCH_PRIO_0);
+						if (current_race_state == STATE_RACING) {
+							current_race_state = STATE_FINISHED;
+							MAC_Set_RX_State(false);
+							APP_DBG(">>> RACE STATE: FINISHED (MAC vypnuto, ceka na mobil) <<<");
+							//UTIL_SEQ_SetTask(1U << CFG_TASK_INIT_SWITCH_PROTOCOL, CFG_SCH_PRIO_0);
+						}
 					}
 				}
 			}

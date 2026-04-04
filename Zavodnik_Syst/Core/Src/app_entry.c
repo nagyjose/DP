@@ -423,11 +423,13 @@ static void APPE_SysEvtReadyProcessing()
   /* Check wireless version */
   APP_CheckWirelessFirmwareInfo();
 
-  if(ConcurrentMode == MAC_ENABLE){
-    APP_FFD_MAC_802_15_4_Init(APP_MAC_802_15_4_FULL, &Mac_802_15_4_CmdBuffer);
-  }else{
-     APP_BLE_Init();
-  }
+  // ===========================================================================
+	// START SKUTEČNÉHO CONCURRENT MÓDU (BLE i MAC běží současně na pozadí)
+	// ===========================================================================
+	APP_DBG(">>> STARTUJI CONCURRENT MODE (BLE + 802.15.4) <<<");
+
+	APP_BLE_Init(); // Zapne BLE Tunel (a začne vysílat Advertising)
+	APP_FFD_MAC_802_15_4_Init(APP_MAC_802_15_4_FULL, &Mac_802_15_4_CmdBuffer); // Zapne MAC
 
   UTIL_LPM_SetOffMode(1U << CFG_LPM_APP, UTIL_LPM_ENABLE);
 
@@ -569,16 +571,16 @@ void HAL_GPIO_EXTI_Callback( uint16_t GPIO_Pin )
   switch (GPIO_Pin)
   {
   case BUTTON_SW1_PIN:
-    APP_DBG("BUTTON 1 PUSHED ! : NO ACTION MAPPED ON SW1");
+    //APP_DBG("BUTTON 1 PUSHED ! : NO ACTION MAPPED ON SW1");
     break;
 
   case BUTTON_SW2_PIN:
-    APP_DBG("BUTTON 2 PUSHED ! : SWITCHING PROTOCOL");
-    UTIL_SEQ_SetTask(1U << CFG_TASK_INIT_SWITCH_PROTOCOL,CFG_SCH_PRIO_0);
+    //APP_DBG("BUTTON 2 PUSHED ! : SWITCHING PROTOCOL");
+    //UTIL_SEQ_SetTask(1U << CFG_TASK_INIT_SWITCH_PROTOCOL,CFG_SCH_PRIO_0);
     break;
 
   case BUTTON_SW3_PIN:
-     APP_DBG("BUTTON 3 PUSHED ! : NO ACTION MAPPED ON SW3");
+     //APP_DBG("BUTTON 3 PUSHED ! : NO ACTION MAPPED ON SW3");
      break;
 
   default:

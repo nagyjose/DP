@@ -50,9 +50,12 @@ void APP_FFD_MAC_802_15_4_Init( APP_MAC_802_15_4_InitMode_t InitMode, TL_CmdPack
   UTIL_SEQ_RegTask( 1<<CFG_TASK_DATA_COORD, UTIL_SEQ_RFU,APP_FFD_MAC_802_15_4_CoordDataTask);
   UTIL_SEQ_RegTask( 1<<CFG_TASK_RECEIVE_DATA, UTIL_SEQ_RFU,APP_MAC_ReceiveData);
   UTIL_SEQ_RegTask( 1<<CFG_TASK_BUZZER, UTIL_SEQ_RFU, APP_MAC_BuzzerTask);
+  UTIL_SEQ_RegTask( 1<<CFG_TASK_MAC_SNIFF, UTIL_SEQ_RFU, APP_MAC_SniffTask);
+	UTIL_SEQ_RegTask( 1<<CFG_TASK_MAC_SLEEP, UTIL_SEQ_RFU, APP_MAC_SleepTask);
   HW_TS_Create(CFG_TIM_PROC_ID_ISR, &BuzzerTimerId, 0, BuzzerTimer_Callback);
 
   APP_FFD_MAC_802_15_4_Config();
+  //Race_StateMachine_Init(); // <-- ZDE SPUSTÍME NÁŠ AUTOMAT
   UTIL_SEQ_SetTask( 1<< CFG_TASK_FFD, CFG_SCH_PRIO_0 );
 }
 
@@ -132,16 +135,26 @@ void APP_FFD_MAC_802_15_4_SetupTask(void)
   MAC_MLMEStartReq( &StartReq);
   UTIL_SEQ_WaitEvt( 1U << CFG_EVT_DEVICE_STARTED_CNF );
 
-  /* ZAPNUTÍ TRVALÉHO PŘÍJMU (Klíčové pro Skener) */
-  memset(&SetReq,0x00,sizeof(MAC_setReq_t));
-  SetReq.PIB_attribute = g_MAC_RX_ON_WHEN_IDLE_c;
-  PIB_Value = g_TRUE;
-  SetReq.PIB_attribute_valuePtr = &PIB_Value;
-  MAC_MLMESetReq( &SetReq );
-  UTIL_SEQ_WaitEvt( 1U << CFG_EVT_SET_CNF );
+  /* ZAPNUTÍ MAC VRSTVY - ALE VE STAVU USPANÉ ANTÉNY! */
+	memset(&SetReq,0x00,sizeof(MAC_setReq_t));
+	SetReq.PIB_attribute = g_MAC_RX_ON_WHEN_IDLE_c;
 
-  APP_DBG("ZAVODNIK READY - Trvale posloucham na kanalu %d!", channel);
-  BSP_LED_On(LED_BLUE);
+	// TADY MUSÍ BÝT g_FALSE! Kdyby tu bylo g_TRUE, anténa se uzamkne a BLE nevysílá!
+	PIB_Value = g_FALSE;
+
+	SetReq.PIB_attribute_valuePtr = &PIB_Value;
+	MAC_MLMESetReq( &SetReq );
+	UTIL_SEQ_WaitEvt( 1U << CFG_EVT_SET_CNF );
+
+	// Upravili jsme text, ať nás to na terminálu nemate :)
+	APP_DBG("ZAVODNIK READY - MAC Inicializovan a USPAN!");
+	BSP_LED_On(LED_BLUE);
+
+	// =========================================================================
+	// SPUŠTĚNÍ AUTOMATU AŽ ZDE! (Nyní je M0+ bezpečně připraven ho poslechnout)
+	// =========================================================================
+	extern void Race_StateMachine_Init(void);
+	Race_StateMachine_Init();
 }
 
 static void APP_FFD_MAC_802_15_4_Config()

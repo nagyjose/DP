@@ -573,6 +573,8 @@ typedef enum
 
   CFG_TASK_BUZZER,			 // Task pro bzučák při oražení kontrolys
 	CFG_TASK_BLE_CHUNKER,      // NÁŠ NOVÝ TASK PRO DÁVKOVÝ PŘENOS DAT PŘES BLE
+	CFG_TASK_MAC_SNIFF,      // NOVÉ: Probuzení rádia
+	CFG_TASK_MAC_SLEEP,      // NOVÉ: Uspání rádia
 
   CFG_LAST_TASK_ID_WITH_HCICMD, /**< Shall be LAST in the list */
 } CFG_Task_Id_With_HCI_Cmd_t;
