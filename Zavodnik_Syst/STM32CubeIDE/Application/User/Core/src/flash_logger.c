@@ -510,3 +510,21 @@ void Config_Commit(RunnerConfig_t *new_cfg)
 
 	APP_DBG("CONFIG: Nova konfigurace byla uspesne vypalena do Flash!");
 }
+
+// -----------------------------------------------------------------------------
+// TVRDÉ RESETOVACÍ FUNKCE (Vyvolané z BLE)
+// -----------------------------------------------------------------------------
+void Config_EraseAndReboot(void)
+{
+    APP_DBG(">>> BLE: Mazani Konfigurace a RESTART! <<<");
+    EraseConfigPage();  // Smaže POUZE nultou stránku
+    NVIC_SystemReset(); // Tvrdý hardwarový restart
+}
+
+void System_FactoryResetAll(void)
+{
+    APP_DBG(">>> BLE: Kompletni Factory Reset a RESTART! <<<");
+    Logger_FormatAll(); // Smaže 159 stránek historie a nakrmí Watchdoga
+    EraseConfigPage();  // Smaže nultou konfigurační stránku
+    NVIC_SystemReset(); // Tvrdý hardwarový restart
+}

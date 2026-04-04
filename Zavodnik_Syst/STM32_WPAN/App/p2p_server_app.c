@@ -352,12 +352,48 @@ static SVCCTL_EvtAckStatus_t Tunnel_Event_Handler(void *pckt)
 								Logger_FormatAll();
 								uint8_t ack_fmt[4] = {0x99, 0x01, 0x00, 0x00}; BLE_Tunnel_Send(ack_fmt, 4);
 								break;
-						}
+						//}
+
+						// =====================================================
+						// 6. FACTORY RESET POUZE KONFIGURACE (0x97)
+						// =====================================================
+						case 0x97:
+							if (!is_unlocked) {
+								uint8_t ack[4] = {0x97, 0xEE, 0x00, 0x00}; BLE_Tunnel_Send(ack, 4);
+								break;
+							}
+
+							// Odešleme mobilu zprávu o úspěchu ještě PŘED restartem
+							uint8_t ack_97[4] = {0x97, 0x01, 0x00, 0x00};
+							BLE_Tunnel_Send(ack_97, 4);
+
+							// Necháme paket 100 ms odletět a pak desku zabijeme
+							HAL_Delay(100);
+							Config_EraseAndReboot();
+							break;
+
+						// =====================================================
+						// 7. KOMPLETNÍ FACTORY RESET - VŠE (0x98)
+						// =====================================================
+						case 0x98:
+							if (!is_unlocked) {
+								uint8_t ack[4] = {0x98, 0xEE, 0x00, 0x00}; BLE_Tunnel_Send(ack, 4);
+								break;
+							}
+
+							// Odešleme mobilu zprávu o úspěchu ještě PŘED restartem
+							uint8_t ack_98[4] = {0x98, 0x01, 0x00, 0x00};
+							BLE_Tunnel_Send(ack_98, 4);
+
+							// Necháme paket 100 ms odletět a pak spustíme kompletní destrukci
+							HAL_Delay(100);
+							System_FactoryResetAll();
+							break;
 
 						default:
 							APP_DBG(">>> BLE CMD: NEZNAMY PRIKAZ (0x%02X)", cmd);
 							break;
-
+					}
 				}
 				break;
 			}
