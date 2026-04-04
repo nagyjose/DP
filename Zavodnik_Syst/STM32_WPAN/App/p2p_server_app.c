@@ -170,19 +170,40 @@ static SVCCTL_EvtAckStatus_t Tunnel_Event_Handler(void *pckt)
 							// TBD: Zapnout LED/Buzzer task
 							break;
 
-						case 0x99: // CMD_FORMAT_MEMORY
-							APP_DBG(">>> BLE CMD: FORMATOVANI PAMETI ZAVODNIKA! (0x99)");
+						case 0x99: // CMD_FORMAT_MEMORY (Nyní chráněno heslem!)
+						{
+								APP_DBG(">>> BLE CMD: Pozadavek na FORMAT (0x99)");
 
-							// Bezpečnostní přerušení vysílání
-							chunk_rem_len = 0;
+								// 1. Ochrana: Mobil poslal příliš krátkou zprávu (chybí heslo)
+								if (mod->Attr_Data_Length < 5) {
+										APP_DBG(">>> BLE SECURITY: Prikaz zamitnut - chybi heslo!");
+										uint8_t ack_err[4] = {0x99, 0xEE, 0x00, 0x00}; // EE = Error
+										BLE_Tunnel_Send(ack_err, 4);
+										break;
+								}
 
-							// Zavoláme drtičku paměti
-							Logger_FormatAll();
+								// 2. Extrakce hesla z přijaté zprávy (Bajty 1 až 4)
+								uint32_t received_pin = ((uint32_t)mod->Attr_Data[1] << 24) |
+																				((uint32_t)mod->Attr_Data[2] << 16) |
+																				((uint32_t)mod->Attr_Data[3] << 8)  |
+																				 (uint32_t)mod->Attr_Data[4];
 
-							// Odpovíme mobilu, že je hotovo
-							uint8_t ack_format[4] = {0x99, 0x01, 0x00, 0x00};
-							BLE_Tunnel_Send(ack_format, 4);
-							break;
+								// 3. Porovnání s uloženým heslem ve Flash paměti
+								if (received_pin == DEVICE_CONFIG->comp_device_hash) {
+										APP_DBG(">>> BLE SECURITY: Heslo OK. Spoustim mazani!");
+
+										chunk_rem_len = 0; // Zastavení případného stahování
+										Logger_FormatAll();
+
+										uint8_t ack_ok[4] = {0x99, 0x01, 0x00, 0x00}; // 01 = Úspěch
+										BLE_Tunnel_Send(ack_ok, 4);
+								} else {
+										APP_DBG(">>> BLE SECURITY: SPATNE HESLO! (Prijato: %lu)", received_pin);
+										uint8_t ack_err[4] = {0x99, 0xEE, 0x00, 0x00};
+										BLE_Tunnel_Send(ack_err, 4);
+								}
+								break;
+						}
 
 						default:
 							APP_DBG(">>> BLE CMD: NEZNAMY PRIKAZ (0x%02X)", cmd);
