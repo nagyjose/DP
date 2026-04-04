@@ -32,6 +32,69 @@ static uint16_t RxCharHdle;
 static uint16_t TxCharHdle;
 
 // =============================================================================
+// SEZNAM HLAVNÍCH BLE PŘÍKAZŮ
+// =============================================================================
+typedef enum {
+    // --- Bezpečnost a Relace ---
+    CMD_UNLOCK              = 0x05,
+    CMD_LOCK                = 0x06,
+    CMD_VERIFY_HASH         = 0x07,
+
+    // --- Čtení dat ---
+    CMD_READ_CONFIG         = 0x10,
+    CMD_DOWNLOAD_CURRENT    = 0x20,
+    CMD_DOWNLOAD_ALL        = 0x21,
+    CMD_DOWNLOAD_SPECIFIC   = 0x22,
+
+    // --- Zápis do Konfigurace (Staging) ---
+    CMD_STAGE_PARAM         = 0x12,
+    CMD_COMMIT_CONFIG       = 0x13,
+
+    // --- Nástroje ---
+    CMD_IDENTIFY            = 0x40,
+
+    // --- Mazání a Resety ---
+    CMD_RESET_CONFIG        = 0x97,
+    CMD_RESET_ALL           = 0x98,
+    CMD_FORMAT_HISTORY      = 0x99
+} BLE_Command_t;
+
+// =============================================================================
+// SEZNAM PARAMETRŮ PRO ÚPRAVU KONFIGURACE (Pro příkaz 0x12)
+// =============================================================================
+typedef enum {
+    // --- Vysílané a základní informace ---
+    PARAM_BLE_DEVICE_NAME   = 0x01,
+    PARAM_DEVICE_TYPE       = 0x02,
+    PARAM_DEVICE_ID         = 0x03,
+    PARAM_DEVICE_HASH       = 0x04,
+
+    // --- Rozhodovací parametry ---
+    PARAM_COOLDOWN_MS       = 0x05,
+    PARAM_REQ_HITS          = 0x06,
+    PARAM_NUM_HITS          = 0x07,
+    PARAM_BUZZER_ONOFF      = 0x08,
+
+    // --- Informace o závodníkovi ---
+    PARAM_COMP_NAME         = 0x09,
+    PARAM_COMP_NAT          = 0x0A,
+    PARAM_COMP_BIRTH_DATE   = 0x0B,
+    PARAM_COMP_EMAIL        = 0x0C,
+    PARAM_COMP_PHONE        = 0x0D,
+    PARAM_COMP_ADDRESS      = 0x0E,
+    PARAM_COMP_REGISTRATION = 0x0F,
+    PARAM_COMP_IOFID        = 0x10,
+    PARAM_COMP_ORISID       = 0x11,
+    PARAM_COMP_TEAM_1       = 0x12,
+    PARAM_COMP_TEAM_2       = 0x13,
+    PARAM_COMP_TEAM_3       = 0x14,
+
+    // --- Dlouhé texty ---
+    PARAM_COMP_MEDICAL_INFO = 0x15,
+    PARAM_COMP_OTHER_INFO   = 0x16
+} Config_Param_t;
+
+// =============================================================================
 // STAVOVÉ PROMĚNNÉ PRO KRÁJEČ (CHUNKER)
 // =============================================================================
 static uint8_t *chunk_ptr = NULL;        // Ukazatel na to, co zrovna odesíláme
@@ -136,7 +199,7 @@ static SVCCTL_EvtAckStatus_t Tunnel_Event_Handler(void *pckt)
 				// Zápis do RX Charakteristiky (Ověření Handle)
 				if (mod->Attr_Handle == (RxCharHdle + 1))
 				{
-					uint8_t cmd = mod->Attr_Data[0];
+					BLE_Command_t cmd = (BLE_Command_t)mod->Attr_Data[0];
 
 					// Bezpečnostní pojistka: Kdyby ještě běžel starý přenos, natvrdo ho zrušíme
 					chunk_rem_len = 0;
@@ -146,7 +209,7 @@ static SVCCTL_EvtAckStatus_t Tunnel_Event_Handler(void *pckt)
 					// =========================================================
 					switch(cmd)
 					{
-						case 0x10: // CMD_READ_CONFIG
+						case CMD_READ_CONFIG: // CMD_READ_CONFIG
 							APP_DBG(">>> BLE CMD: READ CONFIG (0x10) - Odesilam %d bajtu", sizeof(RunnerConfig_t));
 
 							// Nabijeme Kráječ celou Flash strukturou Závodníka
@@ -158,9 +221,9 @@ static SVCCTL_EvtAckStatus_t Tunnel_Event_Handler(void *pckt)
 							UTIL_SEQ_SetTask(1 << CFG_TASK_BLE_CHUNKER, CFG_SCH_PRIO_0);
 							break;
 
-						case 0x20: // CMD_DOWNLOAD_CURRENT (Poslední stránka)
-						case 0x21: // CMD_DOWNLOAD_ALL (Celá historie)
-						case 0x22: // CMD_DOWNLOAD_SPECIFIC (S parametrem)
+						case CMD_DOWNLOAD_CURRENT: // CMD_DOWNLOAD_CURRENT (Poslední stránka)
+						case CMD_DOWNLOAD_ALL: // CMD_DOWNLOAD_ALL (Celá historie)
+						case CMD_DOWNLOAD_SPECIFIC: // CMD_DOWNLOAD_SPECIFIC (S parametrem)
 						{
 							// Přečteme případný druhý bajt (parametr), pokud ho mobil poslal
 							uint8_t param = (mod->Attr_Data_Length >= 2) ? mod->Attr_Data[1] : 0;
@@ -188,7 +251,7 @@ static SVCCTL_EvtAckStatus_t Tunnel_Event_Handler(void *pckt)
 							break;
 						}
 
-						case 0x40: // CMD_IDENTIFY (Najdi můj čip)
+						case CMD_IDENTIFY: // CMD_IDENTIFY (Najdi můj čip)
 							APP_DBG(">>> BLE CMD: IDENTIFY (0x40) - Zacinam blikat!");
 							// TBD: Zapnout LED/Buzzer task
 							break;
@@ -197,7 +260,7 @@ static SVCCTL_EvtAckStatus_t Tunnel_Event_Handler(void *pckt)
 						// 1A. KROK 1: MOBIL ŽÁDÁ O VÝZVU (0x05)
 						// Paket z mobilu: [0x05]
 						// =====================================================
-						case 0x05:
+						case CMD_UNLOCK:
 							// Vygenerujeme náhodné číslo (Využijeme ticky procesoru a UDN čipu)
 							current_challenge = HAL_GetTick() ^ DEVICE_CONFIG->magic_word ^ LL_FLASH_GetUDN();
 
@@ -219,7 +282,7 @@ static SVCCTL_EvtAckStatus_t Tunnel_Event_Handler(void *pckt)
 						// 1B. KROK 2: MOBIL POSÍLÁ RESPONSE K OVĚŘENÍ (0x07)
 						// Paket z mobilu: [0x07] [Resp_1] [Resp_2] [Resp_3] [Resp_4]
 						// =====================================================
-						case 0x07:
+						case CMD_VERIFY_HASH:
 							if (mod->Attr_Data_Length >= 5) {
 								// Přečteme Response od mobilu
 								uint32_t received_response = ((uint32_t)mod->Attr_Data[1] << 24) |
@@ -252,7 +315,7 @@ static SVCCTL_EvtAckStatus_t Tunnel_Event_Handler(void *pckt)
 						// 2. ZAMČENÍ RELACE (0x06)
 						// Paket: [0x06]
 						// =====================================================
-						case 0x06:
+						case CMD_LOCK:
 							is_unlocked = false;
 							memset(&staged_config, 0, sizeof(RunnerConfig_t)); // Bezpečný výmaz RAM
 							APP_DBG(">>> BLE SECURITY: ZAMCENO uzivatelem.");
@@ -263,7 +326,7 @@ static SVCCTL_EvtAckStatus_t Tunnel_Event_Handler(void *pckt)
 						// 3. POSTUPNÉ SKLÁDÁNÍ DO RAM (0x12 - STAGE PARAMETER)
 						// Paket: [0x12] [ID] [Offset_H] [Offset_L] [Data...]
 						// =====================================================
-						case 0x12:
+						case CMD_STAGE_PARAM:
 							if (!is_unlocked) {
 									APP_DBG(">>> BLE SECURITY: Zamitnuto (ZAMCENO)");
 									uint8_t ack[4] = {0x12, 0xEE, 0x00, 0x00}; BLE_Tunnel_Send(ack, 4);
@@ -271,7 +334,7 @@ static SVCCTL_EvtAckStatus_t Tunnel_Event_Handler(void *pckt)
 							}
 
 							if (mod->Attr_Data_Length >= 5) {
-								uint8_t param_id = mod->Attr_Data[1];
+								Config_Param_t param_id = (Config_Param_t)mod->Attr_Data[1];
 								uint16_t offset = (mod->Attr_Data[2] << 8) | mod->Attr_Data[3];
 								uint8_t data_len = mod->Attr_Data_Length - 4;
 								uint8_t *payload = &mod->Attr_Data[4];
@@ -281,34 +344,34 @@ static SVCCTL_EvtAckStatus_t Tunnel_Event_Handler(void *pckt)
 								// Úprava konkrétních proměnných v RAM (s ochranou délky)
 								switch (param_id) {
 									// --- 1. ZÁKLADNÍ / VYSÍLANÉ INFORMACE ---
-									case 0x01: if (offset + data_len <= 32) memcpy(&staged_config.BLE_device_name[offset], payload, data_len); break;
-									case 0x02: if (data_len >= 1) staged_config.comp_device_type = payload[0]; break;
-									case 0x03: if (data_len >= 4) staged_config.comp_device_id = ((uint32_t)payload[0]<<24) | ((uint32_t)payload[1]<<16) | ((uint32_t)payload[2]<<8) | payload[3]; break;
-									case 0x04: if (data_len >= 4) staged_config.comp_device_hash = ((uint32_t)payload[0]<<24) | ((uint32_t)payload[1]<<16) | ((uint32_t)payload[2]<<8) | payload[3]; break;
+									case PARAM_BLE_DEVICE_NAME: if (offset + data_len <= 32) memcpy(&staged_config.BLE_device_name[offset], payload, data_len); break;
+									case PARAM_DEVICE_TYPE: if (data_len >= 1) staged_config.comp_device_type = payload[0]; break;
+									case PARAM_DEVICE_ID: if (data_len >= 4) staged_config.comp_device_id = ((uint32_t)payload[0]<<24) | ((uint32_t)payload[1]<<16) | ((uint32_t)payload[2]<<8) | payload[3]; break;
+									case PARAM_DEVICE_HASH: if (data_len >= 4) staged_config.comp_device_hash = ((uint32_t)payload[0]<<24) | ((uint32_t)payload[1]<<16) | ((uint32_t)payload[2]<<8) | payload[3]; break;
 
 									// --- 2. ROZHODOVACÍ PARAMETRY ---
-									case 0x05: if (data_len >= 2) staged_config.cooldown_ms = ((uint16_t)payload[0]<<8) | payload[1]; break;
-									case 0x06: if (data_len >= 1) staged_config.required_hits = payload[0]; break;
-									case 0x07: if (data_len >= 1) staged_config.num_hits = payload[0]; break;
-									case 0x08: if (data_len >= 1) staged_config.buzzer_onoff = payload[0]; break;
+									case PARAM_COOLDOWN_MS: if (data_len >= 2) staged_config.cooldown_ms = ((uint16_t)payload[0]<<8) | payload[1]; break;
+									case PARAM_REQ_HITS: if (data_len >= 1) staged_config.required_hits = payload[0]; break;
+									case PARAM_NUM_HITS: if (data_len >= 1) staged_config.num_hits = payload[0]; break;
+									case PARAM_BUZZER_ONOFF: if (data_len >= 1) staged_config.buzzer_onoff = payload[0]; break;
 
 									// --- 3. INFORMACE O ZÁVODNÍKOVI ---
-									case 0x09: if (offset + data_len <= 64) memcpy(&staged_config.comp_name[offset], payload, data_len); break;
-									case 0x0A: if (offset + data_len <= 4)  memcpy(&staged_config.comp_nationality[offset], payload, data_len); break;
-									case 0x0B: if (data_len >= 4) staged_config.comp_birthday_date = ((uint32_t)payload[0]<<24) | ((uint32_t)payload[1]<<16) | ((uint32_t)payload[2]<<8) | payload[3]; break;
-									case 0x0C: if (offset + data_len <= 64) memcpy(&staged_config.comp_email[offset], payload, data_len); break;
-									case 0x0D: if (offset + data_len <= 16) memcpy(&staged_config.comp_telephone[offset], payload, data_len); break;
-									case 0x0E: if (offset + data_len <= 128) memcpy(&staged_config.comp_address[offset], payload, data_len); break;
-									case 0x0F: if (offset + data_len <= 8)  memcpy(&staged_config.comp_registration[offset], payload, data_len); break;
-									case 0x10: if (data_len >= 4) staged_config.comp_iofid = ((uint32_t)payload[0]<<24) | ((uint32_t)payload[1]<<16) | ((uint32_t)payload[2]<<8) | payload[3]; break;
-									case 0x11: if (data_len >= 4) staged_config.comp_orisid = ((uint32_t)payload[0]<<24) | ((uint32_t)payload[1]<<16) | ((uint32_t)payload[2]<<8) | payload[3]; break;
-									case 0x12: if (offset + data_len <= 64) memcpy(&staged_config.comp_team_1[offset], payload, data_len); break;
-									case 0x13: if (offset + data_len <= 64) memcpy(&staged_config.comp_team_2[offset], payload, data_len); break;
-									case 0x14: if (offset + data_len <= 64) memcpy(&staged_config.comp_team_3[offset], payload, data_len); break;
+									case PARAM_COMP_NAME: if (offset + data_len <= 64) memcpy(&staged_config.comp_name[offset], payload, data_len); break;
+									case PARAM_COMP_NAT: if (offset + data_len <= 4)  memcpy(&staged_config.comp_nationality[offset], payload, data_len); break;
+									case PARAM_COMP_BIRTH_DATE: if (data_len >= 4) staged_config.comp_birthday_date = ((uint32_t)payload[0]<<24) | ((uint32_t)payload[1]<<16) | ((uint32_t)payload[2]<<8) | payload[3]; break;
+									case PARAM_COMP_EMAIL: if (offset + data_len <= 64) memcpy(&staged_config.comp_email[offset], payload, data_len); break;
+									case PARAM_COMP_PHONE: if (offset + data_len <= 16) memcpy(&staged_config.comp_telephone[offset], payload, data_len); break;
+									case PARAM_COMP_ADDRESS: if (offset + data_len <= 128) memcpy(&staged_config.comp_address[offset], payload, data_len); break;
+									case PARAM_COMP_REGISTRATION: if (offset + data_len <= 8)  memcpy(&staged_config.comp_registration[offset], payload, data_len); break;
+									case PARAM_COMP_IOFID: if (data_len >= 4) staged_config.comp_iofid = ((uint32_t)payload[0]<<24) | ((uint32_t)payload[1]<<16) | ((uint32_t)payload[2]<<8) | payload[3]; break;
+									case PARAM_COMP_ORISID: if (data_len >= 4) staged_config.comp_orisid = ((uint32_t)payload[0]<<24) | ((uint32_t)payload[1]<<16) | ((uint32_t)payload[2]<<8) | payload[3]; break;
+									case PARAM_COMP_TEAM_1: if (offset + data_len <= 64) memcpy(&staged_config.comp_team_1[offset], payload, data_len); break;
+									case PARAM_COMP_TEAM_2: if (offset + data_len <= 64) memcpy(&staged_config.comp_team_2[offset], payload, data_len); break;
+									case PARAM_COMP_TEAM_3: if (offset + data_len <= 64) memcpy(&staged_config.comp_team_3[offset], payload, data_len); break;
 
 									// --- 4. DLOUHÉ TEXTY (Tady využijeme offset naplno!) ---
-									case 0x15: if (offset + data_len <= 512) memcpy(&staged_config.comp_medical_info[offset], payload, data_len); break;
-									case 0x16: if (offset + data_len <= 512) memcpy(&staged_config.comp_other_info[offset], payload, data_len); break;
+									case PARAM_COMP_MEDICAL_INFO: if (offset + data_len <= 512) memcpy(&staged_config.comp_medical_info[offset], payload, data_len); break;
+									case PARAM_COMP_OTHER_INFO: if (offset + data_len <= 512) memcpy(&staged_config.comp_other_info[offset], payload, data_len); break;
 
 									default:
 										APP_DBG(">>> BLE STAGE: Neznamy parametr (0x%02X)", param_id);
@@ -324,7 +387,7 @@ static SVCCTL_EvtAckStatus_t Tunnel_Event_Handler(void *pckt)
 						// 4. HROMADNÝ ZÁPIS DO FLASH (0x13 - COMMIT)
 						// Paket: [0x13]
 						// =====================================================
-						case 0x13:
+						case CMD_COMMIT_CONFIG:
 								if (!is_unlocked) {
 										uint8_t ack[4] = {0x13, 0xEE, 0x00, 0x00}; BLE_Tunnel_Send(ack, 4);
 										break;
@@ -340,7 +403,7 @@ static SVCCTL_EvtAckStatus_t Tunnel_Event_Handler(void *pckt)
 						// 5. BEZPEČNÝ FORMÁT PAMĚTI (0x99)
 						// Nyní nevyžaduje PIN v paketu, protože je chráněn zámkem!
 						// =====================================================
-						case 0x99:
+						case CMD_FORMAT_HISTORY:
 								if (!is_unlocked) {
 										APP_DBG(">>> BLE SECURITY: Zamitnuto - Formát vyžaduje odemknuti!");
 										uint8_t ack[4] = {0x99, 0xEE, 0x00, 0x00}; BLE_Tunnel_Send(ack, 4);
@@ -357,7 +420,7 @@ static SVCCTL_EvtAckStatus_t Tunnel_Event_Handler(void *pckt)
 						// =====================================================
 						// 6. FACTORY RESET POUZE KONFIGURACE (0x97)
 						// =====================================================
-						case 0x97:
+						case CMD_RESET_CONFIG:
 							if (!is_unlocked) {
 								uint8_t ack[4] = {0x97, 0xEE, 0x00, 0x00}; BLE_Tunnel_Send(ack, 4);
 								break;
@@ -375,7 +438,7 @@ static SVCCTL_EvtAckStatus_t Tunnel_Event_Handler(void *pckt)
 						// =====================================================
 						// 7. KOMPLETNÍ FACTORY RESET - VŠE (0x98)
 						// =====================================================
-						case 0x98:
+						case CMD_RESET_ALL:
 							if (!is_unlocked) {
 								uint8_t ack[4] = {0x98, 0xEE, 0x00, 0x00}; BLE_Tunnel_Send(ack, 4);
 								break;

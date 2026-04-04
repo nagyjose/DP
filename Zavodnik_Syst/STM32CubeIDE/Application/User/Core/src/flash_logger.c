@@ -13,6 +13,22 @@ extern IWDG_HandleTypeDef hiwdg; // Potřebujeme sáhnout na psa v main.c
 static uint32_t current_flash_ptr = LOGGER_START_ADDR;
 static uint16_t current_punch_index = 0;
 
+// =============================================================================
+// VÝPOČET CRC-32 (Standardní IEEE 802.3 polynom)
+// =============================================================================
+static uint32_t Calculate_CRC32(uint8_t *data, uint32_t length)
+{
+    uint32_t crc = 0xFFFFFFFF;
+    for (uint32_t i = 0; i < length; i++) {
+        crc ^= data[i];
+        for (uint8_t j = 0; j < 8; j++) {
+            if (crc & 1) crc = (crc >> 1) ^ 0xEDB88320;
+            else crc >>= 1;
+        }
+    }
+    return crc ^ 0xFFFFFFFF;
+}
+
 // Interní pomocná funkce pro smazání 4KB stránky
 static void ErasePage(uint32_t page_address)
 {
@@ -252,6 +268,10 @@ static void Config_FactoryReset(void)
 	strcpy(def_cfg.comp_name, "Neznamy Zavodnik");
 	strcpy(def_cfg.comp_nationality, "CZE");
 
+	// --- VÝPOČET CRC-32 ---
+	def_cfg.control_sum = 0; // Před výpočtem musíme pole vynulovat
+	def_cfg.control_sum = Calculate_CRC32((uint8_t*)&def_cfg, sizeof(RunnerConfig_t));
+
 	// --- ZÁPIS DO FLASH PAMĚTI ---
 	EraseConfigPage(); // Smažeme starý odpad
 
@@ -316,16 +336,31 @@ void Config_Init(void)
 		}
 	}
 
-	// 2. Standardní kontrola magického slova
-	if (DEVICE_CONFIG->magic_word != 0xCAFECAFE)
+	// =========================================================================
+	// 2. KONTROLA INTEGRITY PAMĚTI (Magic Word + CRC-32)
+	// =========================================================================
+
+	// Zkopírujeme si obsah Flash do RAM, abychom s ním mohli pracovat
+	RunnerConfig_t temp_cfg;
+	memcpy(&temp_cfg, (void*)DEVICE_CONFIG, sizeof(RunnerConfig_t));
+
+	// Uložíme si přečtené CRC a pole pro výpočet vynulujeme
+	uint32_t saved_crc = temp_cfg.control_sum;
+	temp_cfg.control_sum = 0;
+
+	// Spočítáme kontrolní součet z dat
+	uint32_t calculated_crc = Calculate_CRC32((uint8_t*)&temp_cfg, sizeof(RunnerConfig_t));
+
+	// Pokud nesedí magické slovo NEBO nesedí CRC, paměť je zničená/prázdná
+	if (DEVICE_CONFIG->magic_word != 0xCAFECAFE || saved_crc != calculated_crc)
 	{
-		APP_DBG("CONFIG: Pamet neznama nebo poskozena!");
-		Config_FactoryReset();
+			APP_DBG("CONFIG: Pamet neznama nebo poskozena! (CRC: Ocekavano %08X, Precteno %08X)", calculated_crc, saved_crc);
+			Config_FactoryReset();
 	}
 	else
 	{
-		APP_DBG("CONFIG: Nacteno OK. Zavodnik: %s (ID: %lu)",
-										 DEVICE_CONFIG->comp_name, DEVICE_CONFIG->comp_device_id);
+			APP_DBG("CONFIG: Nacteno OK. Zavodnik: %s (ID: %lu)",
+											 DEVICE_CONFIG->comp_name, DEVICE_CONFIG->comp_device_id);
 	}
 }
 
@@ -488,6 +523,10 @@ void Logger_FormatAll(void)
 // -----------------------------------------------------------------------------
 void Config_Commit(RunnerConfig_t *new_cfg)
 {
+	// --- VÝPOČET CRC-32 PŘED ZÁPISEM ---
+	new_cfg->control_sum = 0; // Vynulujeme starý součet
+	new_cfg->control_sum = Calculate_CRC32((uint8_t*)new_cfg, sizeof(RunnerConfig_t));
+
 	// 1. Smažeme celou konfigurační stránku ve Flash
 	EraseConfigPage();
 
