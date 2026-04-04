@@ -47,24 +47,27 @@ static uint16_t last_written_control_id = 0xFFFF; // Paměť posledního zápisu
 #define BUZZER_OFF()    HAL_GPIO_WritePin(BUZZER_PORT, BUZZER_PIN, GPIO_PIN_RESET)
 
 // Perioda jednoho tiku v milisekundách (500 ms = půl vteřiny svítí, půl nesvítí)
-#define SIGNAL_PERIOD_MS 500
+#define SIGNAL_PERIOD_MS 100
 
 static bool is_signal_active = false; // Pomocná proměnná pro střídání stavu
 
 // -----------------------------------------------------------------------------
 // UNIVERZÁLNÍ API PRO SPUŠTĚNÍ SIGNALIZACE
 // -----------------------------------------------------------------------------
-void System_Signalize_Start(uint8_t ticks)
+void System_Signalize_Start(uint8_t seconds)
 {
-    // Pokud signalizace zrovna neběží, nahodíme ji okamžitě
-    if (blink_counter == 0) {
-        blink_counter = ticks;
-        is_signal_active = false; // Začneme vždy rozsvícením/pípnutím
-        UTIL_SEQ_SetTask(1 << CFG_TASK_BUZZER, CFG_SCH_PRIO_0);
-    } else {
-        // Pokud už běží (např. oražena další kontrola v rychlém sledu), jen prodloužíme dobu
-        blink_counter = ticks;
-    }
+	// Procesor si sám spočítá, kolikrát musí změnit stav (tiknout)
+	uint8_t ticks_required = (seconds * 1000) / SIGNAL_PERIOD_MS;
+
+	// Pokud signalizace zrovna neběží, nahodíme ji okamžitě
+	if (blink_counter == 0) {
+		blink_counter = ticks_required;
+		is_signal_active = false; // Začneme vždy rozsvícením/pípnutím
+		UTIL_SEQ_SetTask(1 << CFG_TASK_BUZZER, CFG_SCH_PRIO_0);
+	} else {
+		// Pokud už běží, jen jí vnutíme nový čas (nepřičítáme, pouze přepisujeme)
+		blink_counter = ticks_required;
+	}
 }
 
 // =============================================================================
@@ -325,7 +328,7 @@ void APP_MAC_ReceiveData(void)
 
 			// --- SIGNALIZACE (LED a BZUČÁK) ---
 			// 8 tiků * 500 ms = 4 vteřiny vizuální a akustické odezvy
-			System_Signalize_Start(8);
+			System_Signalize_Start(4);
 		}
 		else
 		{

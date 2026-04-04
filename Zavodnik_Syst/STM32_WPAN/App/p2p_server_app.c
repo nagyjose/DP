@@ -255,8 +255,8 @@ static SVCCTL_EvtAckStatus_t Tunnel_Event_Handler(void *pckt)
 						case CMD_IDENTIFY: // CMD_IDENTIFY (Najdi můj čip)
 							APP_DBG(">>> BLE CMD: IDENTIFY (0x40) - Zacinam signalizovat!");
 
-							// 20 tiků * 500 ms = 10 vteřin blikání a pípání
-							System_Signalize_Start(20);
+							// 10 vteřin blikání a pípání
+							System_Signalize_Start(10);
 
 							// Odpovíme mobilu, že úkol běží
 							uint8_t ack_id[4] = {0x40, 0x01, 0x00, 0x00};
