@@ -83,49 +83,53 @@ static void Init_Exti( void );
  */
 int main( void )
 {
-  /**
-   * The OPTVERR flag is wrongly set at power on
-   * It shall be cleared before using any HAL_FLASH_xxx() api
-   */
-  __HAL_FLASH_CLEAR_FLAG(FLASH_FLAG_OPTVERR);
+	/**
+	* The OPTVERR flag is wrongly set at power on
+	* It shall be cleared before using any HAL_FLASH_xxx() api
+	*/
+	__HAL_FLASH_CLEAR_FLAG(FLASH_FLAG_OPTVERR);
 
-   HAL_Init();
+	HAL_Init();
 
-   Reset_Device();
+	Reset_Device();
 
-  /**
-   *
-   * * When the application is expected to run at higher speed, it should be better to set the correct system clock
-   * in system_stm32yyxx.c so that the initialization phase is running at max speed.
-   */
-   SystemClock_Config(); /**< Configure the system clock */
+	/**
+	*
+	* * When the application is expected to run at higher speed, it should be better to set the correct system clock
+	* in system_stm32yyxx.c so that the initialization phase is running at max speed.
+	*/
+	SystemClock_Config(); /**< Configure the system clock */
 
-   Init_Exti( );
+	Init_Exti( );
 
-   Init_RTC();
+	Init_RTC();
 
-   APP_Init( );
+	// --- INICIALIZACE NAŠEHO PWM BZUČÁKU ---
+	extern void Buzzer_PWM_Init(void);
+	Buzzer_PWM_Init();
 
-   /* NÁŠ HARDWAROVÝ WATCHDOG (2 sekundy) */
-	 hiwdg.Instance = IWDG;
-	 hiwdg.Init.Prescaler = IWDG_PRESCALER_32;  // 1 tik = 1 milisekunda
-	 hiwdg.Init.Reload = 2000;                  // Pes kouše po 2000 ms (2 sekundy)
-	 hiwdg.Init.Window = 4095;
-	 if (HAL_IWDG_Init(&hiwdg) != HAL_OK)
-	 {
-			// Pokud se inicializace psa nepovede, natvrdo celou desku zrestartujeme sami.
-			NVIC_SystemReset();
-	 }
+	APP_Init( );
 
-	 snprintf(hw_ver_full, sizeof(hw_ver_full), "%s [%s]", HW_REV_BASE, git_hash);
+	/* NÁŠ HARDWAROVÝ WATCHDOG (2 sekundy) */
+	hiwdg.Instance = IWDG;
+	hiwdg.Init.Prescaler = IWDG_PRESCALER_32;  // 1 tik = 1 milisekunda
+	hiwdg.Init.Reload = 2000;                  // Pes kouše po 2000 ms (2 sekundy)
+	hiwdg.Init.Window = 4095;
+	if (HAL_IWDG_Init(&hiwdg) != HAL_OK)
+	{
+		// Pokud se inicializace psa nepovede, natvrdo celou desku zrestartujeme sami.
+		NVIC_SystemReset();
+	}
 
-	 Logger_Init(); // Najde pointer po startu nebo havárii
-	 Config_Init();
+	snprintf(hw_ver_full, sizeof(hw_ver_full), "%s [%s]", HW_REV_BASE, git_hash);
 
-   while(1)
-   {
-     UTIL_SEQ_Run( UTIL_SEQ_DEFAULT );
-   }
+	Logger_Init(); // Najde pointer po startu nebo havárii
+	Config_Init();
+
+	while(1)
+	{
+		UTIL_SEQ_Run( UTIL_SEQ_DEFAULT );
+	}
 }
 
 /*************************************************************

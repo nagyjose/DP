@@ -59,6 +59,7 @@ MAC_Status_t APP_MAC_mlmePollIndCb( const MAC_pollInd_t * pPollInd );
 
 void APP_MAC_ReceiveData(void);
 void System_Signalize_Start(uint8_t seconds);
+void Buzzer_PWM_Init(void);
 
 #ifdef __cplusplus
 } /* extern "C" */

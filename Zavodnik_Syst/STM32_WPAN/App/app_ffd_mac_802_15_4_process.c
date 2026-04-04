@@ -37,19 +37,66 @@ static uint32_t last_punch_tick = 0; // ZMĚNA: Používáme lokální tick proc
 static uint16_t last_written_control_id = 0xFFFF; // Paměť posledního zápisu do Flash
 
 // =============================================================================
-// HARDWARE DRIVER: BZUČÁK A LED
+// HARDWARE DRIVER: BZUČÁK (PWM) A LED
 // =============================================================================
-// Dočasné piny pro bzučák (změníme později při implementaci PWM)
-#define BUZZER_PORT GPIOB
-#define BUZZER_PIN  GPIO_PIN_8
+TIM_HandleTypeDef htim16; // Náš hardwarový časovač pro bzučák
 
-#define BUZZER_ON()     HAL_GPIO_WritePin(BUZZER_PORT, BUZZER_PIN, GPIO_PIN_SET)
-#define BUZZER_OFF()    HAL_GPIO_WritePin(BUZZER_PORT, BUZZER_PIN, GPIO_PIN_RESET)
+// Makra pro spuštění a zastavení hardwarového PWM
+#define BUZZER_ON()     HAL_TIM_PWM_Start(&htim16, TIM_CHANNEL_1)
+#define BUZZER_OFF()    HAL_TIM_PWM_Stop(&htim16, TIM_CHANNEL_1)
 
-// Perioda jednoho tiku v milisekundách (500 ms = půl vteřiny svítí, půl nesvítí)
+// Perioda jednoho tiku signalizace v milisekundách
 #define SIGNAL_PERIOD_MS 100
 
 static bool is_signal_active = false; // Pomocná proměnná pro střídání stavu
+
+// -----------------------------------------------------------------------------
+// MANUÁLNÍ INICIALIZACE PWM (Bez CubeMX)
+// -----------------------------------------------------------------------------
+void Buzzer_PWM_Init(void)
+{
+	TIM_OC_InitTypeDef sConfigOC = {0};
+	GPIO_InitTypeDef GPIO_InitStruct = {0};
+
+	// 1. Povolení hodin pro Timer 16 a Port B
+	__HAL_RCC_TIM16_CLK_ENABLE();
+	__HAL_RCC_GPIOB_CLK_ENABLE();
+
+	// 2. Nastavení pinu PB8 pro PWM výstup
+	GPIO_InitStruct.Pin = GPIO_PIN_8;
+	GPIO_InitStruct.Mode = GPIO_MODE_AF_PP; // Alternativní funkce (Push-Pull)
+	GPIO_InitStruct.Pull = GPIO_NOPULL;
+	// KRITICKÉ PRO EMC: Low Speed zamezí ostrým hranám a vysokofrekvenčnímu rušení!
+	GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+	// Na STM32WB55 je TIM16_CH1 mapován na PB8 přes Alternate Function 14 (AF14)
+	GPIO_InitStruct.Alternate = GPIO_AF14_TIM16;
+	HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
+
+	// 3. Konfigurace samotného časovače na 4 kHz
+	// Systémové hodiny jsou 64 MHz.
+	htim16.Instance = TIM16;
+	htim16.Init.Prescaler = 64 - 1;       // Zpomalí z 64 MHz na 1 MHz (1 tik = 1 mikrosekunda)
+	htim16.Init.CounterMode = TIM_COUNTERMODE_UP;
+	htim16.Init.Period = 250 - 1;         // 1 MHz / 250 = 4000 Hz (Tedy naše vysněné 4 kHz)
+	htim16.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
+	htim16.Init.RepetitionCounter = 0;
+	htim16.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
+	if (HAL_TIM_PWM_Init(&htim16) != HAL_OK) {
+		// Inicializace selhala (můžeme přidat Error Handler)
+	}
+
+	// 4. Konfigurace Kanálu 1 na 50% střídu (Duty Cycle)
+	sConfigOC.OCMode = TIM_OCMODE_PWM1;
+	sConfigOC.Pulse = 125;                // Přesná polovina z 250 (Period) = 50 % střída
+	sConfigOC.OCPolarity = TIM_OCPOLARITY_HIGH;
+	sConfigOC.OCNPolarity = TIM_OCNPOLARITY_HIGH;
+	sConfigOC.OCFastMode = TIM_OCFAST_DISABLE;
+	sConfigOC.OCIdleState = TIM_OCIDLESTATE_RESET;
+	sConfigOC.OCNIdleState = TIM_OCNIDLESTATE_RESET;
+	if (HAL_TIM_PWM_ConfigChannel(&htim16, &sConfigOC, TIM_CHANNEL_1) != HAL_OK) {
+		// Konfigurace kanálu selhala
+	}
+}
 
 // -----------------------------------------------------------------------------
 // UNIVERZÁLNÍ API PRO SPUŠTĚNÍ SIGNALIZACE
