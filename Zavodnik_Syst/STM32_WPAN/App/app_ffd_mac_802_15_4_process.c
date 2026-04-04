@@ -37,6 +37,37 @@ static uint32_t last_punch_tick = 0; // ZMĚNA: Používáme lokální tick proc
 static uint16_t last_written_control_id = 0xFFFF; // Paměť posledního zápisu do Flash
 
 // =============================================================================
+// HARDWARE DRIVER: BZUČÁK A LED
+// =============================================================================
+// Dočasné piny pro bzučák (změníme později při implementaci PWM)
+#define BUZZER_PORT GPIOB
+#define BUZZER_PIN  GPIO_PIN_8
+
+#define BUZZER_ON()     HAL_GPIO_WritePin(BUZZER_PORT, BUZZER_PIN, GPIO_PIN_SET)
+#define BUZZER_OFF()    HAL_GPIO_WritePin(BUZZER_PORT, BUZZER_PIN, GPIO_PIN_RESET)
+
+// Perioda jednoho tiku v milisekundách (500 ms = půl vteřiny svítí, půl nesvítí)
+#define SIGNAL_PERIOD_MS 500
+
+static bool is_signal_active = false; // Pomocná proměnná pro střídání stavu
+
+// -----------------------------------------------------------------------------
+// UNIVERZÁLNÍ API PRO SPUŠTĚNÍ SIGNALIZACE
+// -----------------------------------------------------------------------------
+void System_Signalize_Start(uint8_t ticks)
+{
+    // Pokud signalizace zrovna neběží, nahodíme ji okamžitě
+    if (blink_counter == 0) {
+        blink_counter = ticks;
+        is_signal_active = false; // Začneme vždy rozsvícením/pípnutím
+        UTIL_SEQ_SetTask(1 << CFG_TASK_BUZZER, CFG_SCH_PRIO_0);
+    } else {
+        // Pokud už běží (např. oražena další kontrola v rychlém sledu), jen prodloužíme dobu
+        blink_counter = ticks;
+    }
+}
+
+// =============================================================================
 // FUNKCE PRO MĚŘENÍ TEPLOTY (INTERNÍ ADC STM32)
 // =============================================================================
 extern ADC_HandleTypeDef hadc1; // Zpřístupníme ADC z main.c, pokud ho tam CubeMX generuje
@@ -105,22 +136,34 @@ static int8_t Get_MCU_Temperature(void)
 }
 
 
-// =============================================================================
-// TASK PRO BLIKÁNÍ LED (A ČASEM BZUČÁKU)
-// =============================================================================
+// -----------------------------------------------------------------------------
+// ASYNCHRONNÍ TASK PRO BLIKÁNÍ A PÍPÁNÍ
+// -----------------------------------------------------------------------------
 void APP_MAC_BuzzerTask(void)
 {
 	if (blink_counter > 0)
 	{
-		BSP_LED_Toggle(LED_GREEN); // Přepne stav LED (blik)
+		is_signal_active = !is_signal_active; // Přepnutí stavu (ON -> OFF -> ON)
+
+		if (is_signal_active) {
+			BSP_LED_On(LED_GREEN);
+			if (DEVICE_CONFIG->buzzer_onoff == 1) BUZZER_ON();
+		} else {
+			BSP_LED_Off(LED_GREEN);
+			BUZZER_OFF();
+		}
+
 		blink_counter--;
 
-		// Znovu se spustí za 100 ms (CFG_TS_TICK_VAL bývá definováno v app_conf)
-		HW_TS_Start(BuzzerTimerId, (uint32_t)(100 * 1000 / CFG_TS_TICK_VAL));
+		// Znovu spustit task za 500 ms
+		HW_TS_Start(BuzzerTimerId, (uint32_t)(SIGNAL_PERIOD_MS * 1000 / CFG_TS_TICK_VAL));
 	}
 	else
 	{
-		BSP_LED_Off(LED_GREEN); // Dokončeno
+		// Konec signalizace - vše bezpečně vypneme
+		BSP_LED_Off(LED_GREEN);
+		BUZZER_OFF();
+		is_signal_active = false;
 	}
 }
 
@@ -280,19 +323,9 @@ void APP_MAC_ReceiveData(void)
 				APP_DBG("ANTI-SPAM: Kontrola %d jiz zapsana, pouze signalizuji!", control_id);
 			}
 
-			// --- SIGNALIZACE (LED a BZUČÁK) [cite: 229, 253] ---
-			if (blink_counter == 0)
-			{
-				blink_counter = 40; // Počet kroků časovače
-
-				// Pokud má závodník v Configu povolený bzučák, zapneme ho
-				if (DEVICE_CONFIG->buzzer_onoff == 1) {
-					// ZDE FYZICKY ZAPNOUT BZUČÁK (např. přes HAL_GPIO_WritePin)
-					// BSP_LED_On(LED_RED); // Placeholder pro bzučák
-				}
-
-				HW_TS_Start(BuzzerTimerId, (uint32_t)(100 * 1000 / CFG_TS_TICK_VAL));
-			}
+			// --- SIGNALIZACE (LED a BZUČÁK) ---
+			// 8 tiků * 500 ms = 4 vteřiny vizuální a akustické odezvy
+			System_Signalize_Start(8);
 		}
 		else
 		{

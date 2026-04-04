@@ -16,6 +16,7 @@
 #include "stm32_seq.h"
 #include "flash_logger.h"
 #include <stdbool.h>
+#include "app_ffd_mac_802_15_4_process.h"
 
 // --- NAŠE UNIKÁTNÍ UUID (128-bit) ---
 #define COPY_SERVICE_UUID(uuid_struct) { \
@@ -252,8 +253,14 @@ static SVCCTL_EvtAckStatus_t Tunnel_Event_Handler(void *pckt)
 						}
 
 						case CMD_IDENTIFY: // CMD_IDENTIFY (Najdi můj čip)
-							APP_DBG(">>> BLE CMD: IDENTIFY (0x40) - Zacinam blikat!");
-							// TBD: Zapnout LED/Buzzer task
+							APP_DBG(">>> BLE CMD: IDENTIFY (0x40) - Zacinam signalizovat!");
+
+							// 20 tiků * 500 ms = 10 vteřin blikání a pípání
+							System_Signalize_Start(20);
+
+							// Odpovíme mobilu, že úkol běží
+							uint8_t ack_id[4] = {0x40, 0x01, 0x00, 0x00};
+							BLE_Tunnel_Send(ack_id, 4);
 							break;
 
 						// =====================================================
