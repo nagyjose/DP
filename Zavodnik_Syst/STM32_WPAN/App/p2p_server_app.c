@@ -31,6 +31,8 @@
 static uint16_t OrienteeringServiceHdle;
 static uint16_t RxCharHdle;
 static uint16_t TxCharHdle;
+static uint16_t current_conn_handle = 0xFFFF; // Handle aktuálního spojení
+static bool sleep_pending = false;            // Čekáme na slušné odpojení?
 
 // =============================================================================
 // SEZNAM HLAVNÍCH BLE PŘÍKAZŮ
@@ -53,6 +55,7 @@ typedef enum {
 
     // --- Nástroje ---
     CMD_IDENTIFY            = 0x40,
+		CMD_SLEEP               = 0x51,  // PŘIDÁNO: Příkaz pro návrat do MAC
 
     // --- Mazání a Resety ---
     CMD_RESET_CONFIG        = 0x97,
@@ -263,6 +266,27 @@ static SVCCTL_EvtAckStatus_t Tunnel_Event_Handler(void *pckt)
 							BLE_Tunnel_Send(ack_id, 4);
 							break;
 
+						case CMD_SLEEP: // CMD_SLEEP (Návrat z BLE do MAC)
+							APP_DBG(">>> BLE CMD: SLEEP (0x51) - Zacinam slusne odpojovani...");
+
+							// Odpovíme mobilu, že povel přijímáme
+							uint8_t ack_sleep[4] = {0x51, 0x01, 0x00, 0x00};
+							BLE_Tunnel_Send(ack_sleep, 4);
+
+							sleep_pending = true; // Nastavíme vlajku, že chceme jít spát
+
+							// !!! OPRAVA GATT 133: Dáme koprocesoru 100 ms na fyzické odeslání !!!
+							HAL_Delay(100);
+
+							if (current_conn_handle != 0xFFFF) {
+								// 0x13 = Remote User Terminated Connection (Slusne odpojeni)
+								aci_gap_terminate(current_conn_handle, 0x13);
+							} else {
+								// Pojistka: Kdybychom handle neměli, přepneme rovnou
+								UTIL_SEQ_SetTask(1U << CFG_TASK_INIT_SWITCH_PROTOCOL, CFG_SCH_PRIO_0);
+							}
+							break;
+
 						// =====================================================
 						// 1A. KROK 1: MOBIL ŽÁDÁ O VÝZVU (0x05)
 						// Paket z mobilu: [0x05]
@@ -395,33 +419,33 @@ static SVCCTL_EvtAckStatus_t Tunnel_Event_Handler(void *pckt)
 						// Paket: [0x13]
 						// =====================================================
 						case CMD_COMMIT_CONFIG:
-								if (!is_unlocked) {
-										uint8_t ack[4] = {0x13, 0xEE, 0x00, 0x00}; BLE_Tunnel_Send(ack, 4);
-										break;
-								}
-
-								APP_DBG(">>> BLE COMMIT: Zapisuji vsechny RAM upravy do Flash!");
-								Config_Commit(&staged_config);
-
-								uint8_t ack_com[4] = {0x13, 0x01, 0x00, 0x00}; BLE_Tunnel_Send(ack_com, 4);
+							if (!is_unlocked) {
+								uint8_t ack[4] = {0x13, 0xEE, 0x00, 0x00}; BLE_Tunnel_Send(ack, 4);
 								break;
+							}
+
+							APP_DBG(">>> BLE COMMIT: Zapisuji vsechny RAM upravy do Flash!");
+							Config_Commit(&staged_config);
+
+							uint8_t ack_com[4] = {0x13, 0x01, 0x00, 0x00}; BLE_Tunnel_Send(ack_com, 4);
+							break;
 
 						// =====================================================
 						// 5. BEZPEČNÝ FORMÁT PAMĚTI (0x99)
 						// Nyní nevyžaduje PIN v paketu, protože je chráněn zámkem!
 						// =====================================================
 						case CMD_FORMAT_HISTORY:
-								if (!is_unlocked) {
-										APP_DBG(">>> BLE SECURITY: Zamitnuto - Formát vyžaduje odemknuti!");
-										uint8_t ack[4] = {0x99, 0xEE, 0x00, 0x00}; BLE_Tunnel_Send(ack, 4);
-										break;
-								}
-
-								APP_DBG(">>> BLE CMD: FORMATOVANI PAMETI ZAVODNIKA! (0x99)");
-								chunk_rem_len = 0;
-								Logger_FormatAll();
-								uint8_t ack_fmt[4] = {0x99, 0x01, 0x00, 0x00}; BLE_Tunnel_Send(ack_fmt, 4);
+							if (!is_unlocked) {
+								APP_DBG(">>> BLE SECURITY: Zamitnuto - Formát vyžaduje odemknuti!");
+								uint8_t ack[4] = {0x99, 0xEE, 0x00, 0x00}; BLE_Tunnel_Send(ack, 4);
 								break;
+							}
+
+							APP_DBG(">>> BLE CMD: FORMATOVANI PAMETI ZAVODNIKA! (0x99)");
+							chunk_rem_len = 0;
+							Logger_FormatAll();
+							uint8_t ack_fmt[4] = {0x99, 0x01, 0x00, 0x00}; BLE_Tunnel_Send(ack_fmt, 4);
+							break;
 						//}
 
 						// =====================================================
@@ -516,17 +540,28 @@ void P2PS_APP_Notification(P2PS_APP_ConnHandle_Not_evt_t *pNotification)
 	{
 		case PEER_CONN_HANDLE_EVT:
 			APP_DBG(">>> BLE TUNEL: Mobil pripojen!");
+			current_conn_handle = pNotification->ConnectionHandle; // Uložíme si Handle
 			break;
+
 		case PEER_DISCON_HANDLE_EVT:
 			APP_DBG(">>> BLE TUNEL: Mobil odpojen!");
-			// Pokud se mobil utrhne uprostřed stahování, natvrdo ho zrušíme
+			current_conn_handle = 0xFFFF; // Vymažeme Handle
 			chunk_rem_len = 0;
 
 			// BEZPEČNOST: Automaticky zamknout a smazat RAM buffer
 			is_unlocked = false;
 			memset(&staged_config, 0, sizeof(RunnerConfig_t));
-			APP_DBG(">>> BLE SECURITY: Spojeni ztraceno -> AUTO-LOCK aktivovan!");
+
+			if (sleep_pending) {
+				// Pokud mobil inicioval spánek (nebo jsme ho vykopli my přes CMD_SLEEP)
+				sleep_pending = false;
+				APP_DBG(">>> BLE TUNEL: Provedeno slusne odpojeni. Prepinam na MAC!");
+				UTIL_SEQ_SetTask(1U << CFG_TASK_INIT_SWITCH_PROTOCOL, CFG_SCH_PRIO_0);
+			} else {
+				APP_DBG(">>> BLE SECURITY: Spojeni ztraceno -> AUTO-LOCK aktivovan!");
+			}
 			break;
+
 		default:
 			break;
 	}
