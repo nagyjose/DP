@@ -5,391 +5,567 @@
  * @author  MCD Application Team
  * @brief   peer to peer Server Application
   ******************************************************************************
-  * @attention
-  *
-  * Copyright (c) 2019-2021 STMicroelectronics.
-  * All rights reserved.
-  *
-  * This software is licensed under terms that can be found in the LICENSE file
-  * in the root directory of this software component.
-  * If no LICENSE file comes with this software, it is provided AS-IS.
-  *
-  ******************************************************************************
   */
 /* USER CODE END Header */
 
-/* Includes ------------------------------------------------------------------*/
-#include "app_common.h"
-#include "dbg_trace.h"
-#include "ble.h"
 #include "p2p_server_app.h"
+#include "dbg_trace.h"
+#include "app_conf.h"
+#include "ble.h"
+#include "hci_tl.h"
 #include "stm32_seq.h"
+#include "flash_logger.h"
+#include <stdbool.h>
+#include "app_ffd_mac_802_15_4_process.h"
 
-/* Private includes ----------------------------------------------------------*/
-/* USER CODE BEGIN Includes */
+// --- NAŠE UNIKÁTNÍ UUID (128-bit) ---
+#define COPY_SERVICE_UUID(uuid_struct) { \
+  (uuid_struct)[0]=0x19; (uuid_struct)[1]=0xed; (uuid_struct)[2]=0x82; (uuid_struct)[3]=0xae; \
+  (uuid_struct)[4]=0xed; (uuid_struct)[5]=0x21; (uuid_struct)[6]=0x4c; (uuid_struct)[7]=0x9d; \
+  (uuid_struct)[8]=0x41; (uuid_struct)[9]=0x45; (uuid_struct)[10]=0x22; (uuid_struct)[11]=0x8e; \
+  (uuid_struct)[12]=0x40; (uuid_struct)[13]=0xFE; (uuid_struct)[14]=0x00; (uuid_struct)[15]=0x00; }
 
-/* USER CODE END Includes */
+#define COPY_RX_UUID(uuid_struct) { (uuid_struct)[12]=0x41; (uuid_struct)[13]=0xFE; }
+#define COPY_TX_UUID(uuid_struct) { (uuid_struct)[12]=0x42; (uuid_struct)[13]=0xFE; }
 
-/* Private typedef -----------------------------------------------------------*/
-/* USER CODE BEGIN PTD */
- typedef struct{
-    uint8_t             Device_Led_Selection;
-    uint8_t             Led1;
- }P2P_LedCharValue_t;
+static uint16_t OrienteeringServiceHdle;
+static uint16_t RxCharHdle;
+static uint16_t TxCharHdle;
+static uint16_t current_conn_handle = 0xFFFF; // Handle aktuálního spojení
+static bool sleep_pending = false;            // Čekáme na slušné odpojení?
 
- typedef struct{
-    uint8_t             Device_Button_Selection;
-    uint8_t             ButtonStatus;
- }P2P_ButtonCharValue_t;
+// =============================================================================
+// SEZNAM HLAVNÍCH BLE PŘÍKAZŮ
+// =============================================================================
+typedef enum {
+    // --- Bezpečnost a Relace ---
+    CMD_UNLOCK              = 0x05,
+    CMD_LOCK                = 0x06,
+    CMD_VERIFY_HASH         = 0x07,
 
-typedef struct
-{
-  uint8_t               Notification_Status; /* used to check if P2P Server is enabled to Notify */
-  P2P_LedCharValue_t    LedControl;
-  P2P_ButtonCharValue_t ButtonControl;
-  uint16_t              ConnectionHandle;
-} P2P_Server_App_Context_t;
-/* USER CODE END PTD */
+    // --- Čtení dat ---
+    CMD_READ_CONFIG         = 0x10,
+    CMD_DOWNLOAD_CURRENT    = 0x20,
+    CMD_DOWNLOAD_ALL        = 0x21,
+    CMD_DOWNLOAD_SPECIFIC   = 0x22,
 
-/* Private defines ------------------------------------------------------------*/
-/* USER CODE BEGIN PD */
+    // --- Zápis do Konfigurace (Staging) ---
+    CMD_STAGE_PARAM         = 0x12,
+    CMD_COMMIT_CONFIG       = 0x13,
 
-/* USER CODE END PD */
+    // --- Nástroje ---
+    CMD_IDENTIFY            = 0x40,
+		CMD_SLEEP               = 0x51,  // PŘIDÁNO: Příkaz pro návrat do MAC
 
-/* Private macros -------------------------------------------------------------*/
-/* USER CODE BEGIN PM */
+    // --- Mazání a Resety ---
+    CMD_RESET_CONFIG        = 0x97,
+    CMD_RESET_ALL           = 0x98,
+    CMD_FORMAT_HISTORY      = 0x99
+} BLE_Command_t;
 
-/* USER CODE END PM */
+// =============================================================================
+// SEZNAM PARAMETRŮ PRO ÚPRAVU KONFIGURACE (Pro příkaz 0x12)
+// =============================================================================
+typedef enum {
+    // --- Základní informace ---
+    PARAM_BLE_DEVICE_NAME   = 0x01,
+    PARAM_HASH_DEVICE       = 0x02,
 
-/* Private variables ---------------------------------------------------------*/
-/* USER CODE BEGIN PV */
-/**
- * START of Section BLE_APP_CONTEXT
- */
+    // --- Vysílané informace (Maják) ---
+    PARAM_STAT_DEVICE_TYPE  = 0x03, // 12bit ID Kontroly (CLEAR, START, atd.)
+    PARAM_REQ_RSSI          = 0x04,
+    PARAM_EVENT_NATION      = 0x05,
+    PARAM_EVENT_ID          = 0x06,
 
-static P2P_Server_App_Context_t P2P_Server_App_Context;
+    // --- Nastavovací parametry ---
+    PARAM_BEACON_PERIOD_MS  = 0x07,
+    PARAM_BEACON_PERIOD_LP  = 0x08,
+    PARAM_BUZZER_ONOFF      = 0x09,
+    PARAM_TX_POWER          = 0x0A,
+    PARAM_BAT_ALERT_THRESH  = 0x0B,
 
-/**
- * END of Section BLE_APP_CONTEXT
- */
-/* USER CODE END PV */
+    // --- Informace o vlastníkovi (Oddíl) ---
+    PARAM_TEAM_OWNER        = 0x0C,
+    PARAM_TEAM_SHORTCUT     = 0x0D,
+    PARAM_TEAM_NATION       = 0x0E,
+    PARAM_TEAM_LEADER       = 0x0F,
+    PARAM_TEAM_EMAIL        = 0x10,
+    PARAM_TEAM_PHONE        = 0x11,
+    PARAM_TEAM_ADDRESS      = 0x12,
+    PARAM_TEAM_BANK         = 0x13,
+    PARAM_TEAM_IBAN         = 0x14,
+    PARAM_TEAM_BIC          = 0x15,
+    PARAM_TEAM_ORISID       = 0x16,
+    PARAM_TEAM_OTHER_INFO   = 0x17
+} Config_Param_t;
 
-/* Private function prototypes -----------------------------------------------*/
-/* USER CODE BEGIN PFP */
-static void P2PS_Send_Notification(void);
-static void P2PS_APP_LED_BUTTON_context_Init(void);
-/* USER CODE END PFP */
+// =============================================================================
+// STAVOVÉ PROMĚNNÉ PRO KRÁJEČ (CHUNKER)
+// =============================================================================
+static uint8_t *chunk_ptr = NULL;        // Ukazatel na to, co zrovna odesíláme
+static uint32_t chunk_rem_len = 0;       // Kolik bajtů nám ještě zbývá odeslat
+static uint8_t  chunk_active_cmd = 0;    // Jaký příkaz se zrovna vykonává
 
-/* Functions Definition ------------------------------------------------------*/
-void P2PS_STM_App_Notification(P2PS_STM_App_Notification_evt_t *pNotification)
-{
-/* USER CODE BEGIN P2PS_STM_App_Notification_1 */
+#define CHUNK_MAX_SIZE 20 // Maximální velikost jedné rány (BLE MTU to bezpečně snese)
 
-/* USER CODE END P2PS_STM_App_Notification_1 */
-  switch(pNotification->P2P_Evt_Opcode)
-  {
-/* USER CODE BEGIN P2PS_STM_App_Notification_P2P_Evt_Opcode */
-#if(BLE_CFG_OTA_REBOOT_CHAR != 0)
-    case P2PS_STM_BOOT_REQUEST_EVT:
-      APP_DBG_MSG("-- P2P APPLICATION SERVER : BOOT REQUESTED\n");
-      APP_DBG_MSG(" \n\r");
+// =============================================================================
+// STAVOVÉ PROMĚNNÉ PRO RELACI (SESSION & STAGING)
+// =============================================================================
+static bool is_unlocked = false;           // Stav zámku (Odemčeno / Zamčeno)
+static BeaconConfig_t staged_config;       // RAM kopie konfigurace KONTROLY pro úpravy      // RAM kopie konfigurace pro úpravy
 
-      *(uint32_t*)SRAM1_BASE = *(uint32_t*)pNotification->DataTransfered.pPayload;
-      NVIC_SystemReset();
-      break;
-#endif
-/* USER CODE END P2PS_STM_App_Notification_P2P_Evt_Opcode */
+// =============================================================================
+// KRYPTOGRAFIE (Challenge-Response)
+// =============================================================================
+static uint32_t current_challenge = 0; // Paměť pro aktuálně vygenerovanou výzvu
 
-    case P2PS_STM__NOTIFY_ENABLED_EVT:
-/* USER CODE BEGIN P2PS_STM__NOTIFY_ENABLED_EVT */
-      P2P_Server_App_Context.Notification_Status = 1;
-      APP_DBG_MSG("-- P2P APPLICATION SERVER : NOTIFICATION ENABLED\n"); 
-      APP_DBG_MSG(" \n\r");
-/* USER CODE END P2PS_STM__NOTIFY_ENABLED_EVT */
-      break;
-
-    case P2PS_STM_NOTIFY_DISABLED_EVT:
-/* USER CODE BEGIN P2PS_STM_NOTIFY_DISABLED_EVT */
-      P2P_Server_App_Context.Notification_Status = 0;
-      APP_DBG_MSG("-- P2P APPLICATION SERVER : NOTIFICATION DISABLED\n");
-      APP_DBG_MSG(" \n\r");
-/* USER CODE END P2PS_STM_NOTIFY_DISABLED_EVT */
-      break;
-      
-    case P2PS_STM_WRITE_EVT:
-/* USER CODE BEGIN P2PS_STM_WRITE_EVT */
-      if(pNotification->DataTransfered.pPayload[0] == 0x00){ /* ALL Deviceselected - may be necessary as LB Routeur informs all connection */
-        if(pNotification->DataTransfered.pPayload[1] == 0x01)
-        {
-          BSP_LED_On(LED_RED);
-          APP_DBG_MSG("-- P2P APPLICATION SERVER  : LED1 ON\n"); 
-          APP_DBG_MSG(" \n\r");
-          P2P_Server_App_Context.LedControl.Led1=0x01; /* LED1 ON */
-        }
-        if(pNotification->DataTransfered.pPayload[1] == 0x00)
-        {
-          BSP_LED_Off(LED_RED);
-          APP_DBG_MSG("-- P2P APPLICATION SERVER  : LED1 OFF\n"); 
-          APP_DBG_MSG(" \n\r");
-          P2P_Server_App_Context.LedControl.Led1=0x00; /* LED1 OFF */
-        }
-      }
-#if(P2P_SERVER1 != 0)  
-      if(pNotification->DataTransfered.pPayload[0] == 0x01){ /* end device 1 selected - may be necessary as LB Routeur informs all connection */
-        if(pNotification->DataTransfered.pPayload[1] == 0x01)
-        {
-          BSP_LED_On(LED_RED);
-          APP_DBG_MSG("-- P2P APPLICATION SERVER 1 : LED1 ON\n"); 
-          APP_DBG_MSG(" \n\r");
-          P2P_Server_App_Context.LedControl.Led1=0x01; /* LED1 ON */
-        }
-        if(pNotification->DataTransfered.pPayload[1] == 0x00)
-        {
-          BSP_LED_Off(LED_RED);
-          APP_DBG_MSG("-- P2P APPLICATION SERVER 1 : LED1 OFF\n"); 
-          APP_DBG_MSG(" \n\r");
-          P2P_Server_App_Context.LedControl.Led1=0x00; /* LED1 OFF */
-        }
-        /* Switch to Mac */
-        if(pNotification->DataTransfered.pPayload[1] == 0x02)
-        {
-            BSP_LED_Off(LED_RED);
-            APP_DBG("SYSTEM: SWITCH TO MAC");
-            APP_DBG_MSG("-- P2P APPLICATION SERVER 1 : SWITCH TO MAC\n");
-            APP_DBG_MSG(" \n\r");
-            /* Set "Switch Protocol" Task */
-            UTIL_SEQ_SetTask(1<<CFG_TASK_INIT_SWITCH_PROTOCOL,CFG_SCH_PRIO_0);
-        }
-      }
-#endif
-#if(P2P_SERVER2 != 0)
-      if(pNotification->DataTransfered.pPayload[0] == 0x02){ /* end device 2 selected */ 
-        if(pNotification->DataTransfered.pPayload[1] == 0x01)
-        {
-          BSP_LED_On(LED_RED);
-           APP_DBG_MSG("-- P2P APPLICATION SERVER 2 : LED1 ON\n"); 
-          APP_DBG_MSG(" \n\r");
-          P2P_Server_App_Context.LedControl.Led1=0x01; /* LED1 ON */
-        }
-        if(pNotification->DataTransfered.pPayload[1] == 0x00)
-        {
-          BSP_LED_Off(LED_RED);
-          APP_DBG_MSG("-- P2P APPLICATION SERVER 2 : LED1 OFF\n"); 
-          APP_DBG_MSG(" \n\r");
-          P2P_Server_App_Context.LedControl.Led1=0x00; /* LED1 OFF */
-        }   
-      }
-#endif      
-#if(P2P_SERVER3 != 0)  
-      if(pNotification->DataTransfered.pPayload[0] == 0x03){ /* end device 3 selected - may be necessary as LB Routeur informs all connection */
-        if(pNotification->DataTransfered.pPayload[1] == 0x01)
-        {
-          BSP_LED_On(LED_RED);
-          APP_DBG_MSG("-- P2P APPLICATION SERVER 3 : LED1 ON\n"); 
-          APP_DBG_MSG(" \n\r");
-          P2P_Server_App_Context.LedControl.Led1=0x01; /* LED1 ON */
-        }
-        if(pNotification->DataTransfered.pPayload[1] == 0x00)
-        {
-          BSP_LED_Off(LED_RED);
-          APP_DBG_MSG("-- P2P APPLICATION SERVER 3 : LED1 OFF\n"); 
-          APP_DBG_MSG(" \n\r");
-          P2P_Server_App_Context.LedControl.Led1=0x00; /* LED1 OFF */
-        }
-      }
-#endif
-#if(P2P_SERVER4 != 0)
-      if(pNotification->DataTransfered.pPayload[0] == 0x04){ /* end device 4 selected */ 
-        if(pNotification->DataTransfered.pPayload[1] == 0x01)
-        {
-          BSP_LED_On(LED_RED);
-           APP_DBG_MSG("-- P2P APPLICATION SERVER 2 : LED1 ON\n"); 
-          APP_DBG_MSG(" \n\r");
-          P2P_Server_App_Context.LedControl.Led1=0x01; /* LED1 ON */
-        }
-        if(pNotification->DataTransfered.pPayload[1] == 0x00)
-        {
-          BSP_LED_Off(LED_RED);
-          APP_DBG_MSG("-- P2P APPLICATION SERVER 2 : LED1 OFF\n"); 
-          APP_DBG_MSG(" \n\r");
-          P2P_Server_App_Context.LedControl.Led1=0x00; /* LED1 OFF */
-        }   
-      }
-#endif     
-#if(P2P_SERVER5 != 0)  
-      if(pNotification->DataTransfered.pPayload[0] == 0x05){ /* end device 5 selected - may be necessary as LB Routeur informs all connection */
-        if(pNotification->DataTransfered.pPayload[1] == 0x01)
-        {
-          BSP_LED_On(LED_RED);
-          APP_DBG_MSG("-- P2P APPLICATION SERVER 5 : LED1 ON\n"); 
-          APP_DBG_MSG(" \n\r");
-          P2P_Server_App_Context.LedControl.Led1=0x01; /* LED1 ON */
-        }
-        if(pNotification->DataTransfered.pPayload[1] == 0x00)
-        {
-          BSP_LED_Off(LED_RED);
-          APP_DBG_MSG("-- P2P APPLICATION SERVER 5 : LED1 OFF\n"); 
-          APP_DBG_MSG(" \n\r");
-          P2P_Server_App_Context.LedControl.Led1=0x00; /* LED1 OFF */
-        }
-      }
-#endif
-#if(P2P_SERVER6 != 0)
-      if(pNotification->DataTransfered.pPayload[0] == 0x06){ /* end device 6 selected */ 
-        if(pNotification->DataTransfered.pPayload[1] == 0x01)
-        {
-          BSP_LED_On(LED_RED);
-           APP_DBG_MSG("-- P2P APPLICATION SERVER 6 : LED1 ON\n"); 
-          APP_DBG_MSG(" \n\r");
-          P2P_Server_App_Context.LedControl.Led1=0x01; /* LED1 ON */
-        }
-        if(pNotification->DataTransfered.pPayload[1] == 0x00)
-        {
-          BSP_LED_Off(LED_RED);
-          APP_DBG_MSG("-- P2P APPLICATION SERVER 6 : LED1 OFF\n"); 
-          APP_DBG_MSG(" \n\r");
-          P2P_Server_App_Context.LedControl.Led1=0x00; /* LED1 OFF */
-        }   
-      }
-#endif 
-/* USER CODE END P2PS_STM_WRITE_EVT */
-      break;
-
-    default:
-/* USER CODE BEGIN P2PS_STM_App_Notification_default */
-      
-/* USER CODE END P2PS_STM_App_Notification_default */
-      break;
-  }
-/* USER CODE BEGIN P2PS_STM_App_Notification_2 */
-
-/* USER CODE END P2PS_STM_App_Notification_2 */
-  return;
+// Murmur3 Avalanche Hash (Jednoduchá, ale velmi silná míchací funkce)
+static uint32_t Generate_Response(uint32_t challenge, uint32_t pin) {
+    uint32_t mix = challenge ^ pin; // Smícháme výzvu s tajným heslem
+    mix ^= mix >> 16;
+    mix *= 0x85ebca6b;
+    mix ^= mix >> 13;
+    mix *= 0xc2b2ae35;
+    mix ^= mix >> 16;
+    return mix; // Výsledný Hash (Response)
 }
 
+// =============================================================================
+// FUNKCE KRÁJEČE (Volá se asynchronně přes Sequencer)
+// =============================================================================
+void BLE_Chunker_Task(void)
+{
+	if (chunk_rem_len == 0) return; // Není co posílat
+
+	// Zjistíme, jestli pošleme plných 200 bajtů, nebo už jen zbytek
+	uint16_t send_len = (chunk_rem_len > CHUNK_MAX_SIZE) ? CHUNK_MAX_SIZE : chunk_rem_len;
+
+	// Fyzický pokus o odeslání do fronty Bluetooth rádia
+	tBleStatus ret = aci_gatt_update_char_value(OrienteeringServiceHdle, TxCharHdle, 0, send_len, chunk_ptr);
+
+	if (ret == BLE_STATUS_SUCCESS)
+	{
+		// Paket vložen do vysílače! Posuneme ukazatele dopředu.
+		chunk_ptr += send_len;
+		chunk_rem_len -= send_len;
+
+		// PŘIDÁNO: Nativní podpora pro Kruhový Buffer (Přetečení)
+		if ((uint32_t)chunk_ptr >= (LOGGER_START_ADDR + (LOGGER_MAX_PAGES * LOGGER_PAGE_SIZE))) {
+			chunk_ptr = (uint8_t*)LOGGER_START_ADDR;
+		}
+
+		if (chunk_rem_len > 0) {
+			// Pořád máme data, takže se pokusíme rovnou vypálit další dávku
+			UTIL_SEQ_SetTask(1 << CFG_TASK_BLE_CHUNKER, CFG_SCH_PRIO_0);
+		} else {
+			APP_DBG(">>> BLE CHUNKER: Prenos dokoncen! (CMD: 0x%02X)", chunk_active_cmd);
+		}
+	}
+	else if (ret == BLE_STATUS_INSUFFICIENT_RESOURCES)
+	{
+		// Fronta rádia je dočasně plná. Nevadí, jdeme spát a počkáme na přerušení (TX_POOL_AVAILABLE)
+		// APP_DBG(">>> BLE CHUNKER: Fronta plna, cekam na uvolneni...");
+	}
+	else
+	{
+		APP_DBG(">>> BLE CHUNKER: Kriticka chyba odeslani! (Err: 0x%02X)", ret);
+	}
+}
+
+// -----------------------------------------------------------------------------
+// CALLBACK: PARSER - Zde zpracováváme příkazy z Mobilu a zprávy z Rádia
+// -----------------------------------------------------------------------------
+static SVCCTL_EvtAckStatus_t Tunnel_Event_Handler(void *pckt)
+{
+	hci_uart_pckt *hci_pckt = (hci_uart_pckt *)pckt;
+	hci_event_pckt *event_pckt = (hci_event_pckt*)hci_pckt->data;
+
+	if (hci_pckt->type != HCI_EVENT_PKT_TYPE) return SVCCTL_EvtNotAck;
+
+	if (event_pckt->evt == HCI_VENDOR_SPECIFIC_DEBUG_EVT_CODE)
+	{
+		evt_blecore_aci *blecore_evt = (evt_blecore_aci*)event_pckt->data;
+
+		switch (blecore_evt->ecode)
+		{
+			// --- A) ZPRÁVA Z RÁDIA: MÁM MÍSTO, MŮŽEŠ VYSÍLAT ---
+			case ACI_GATT_TX_POOL_AVAILABLE_VSEVT_CODE:
+				if (chunk_rem_len > 0) {
+					// Rádio odeslalo předchozí pakety do éteru a vyprázdnilo frontu. Probudíme Kráječ.
+					UTIL_SEQ_SetTask(1 << CFG_TASK_BLE_CHUNKER, CFG_SCH_PRIO_0);
+				}
+				break;
+
+			// --- B) ZPRÁVA Z MOBILU: UŽIVATEL POSLAL PŘÍKAZ ---
+			case ACI_GATT_ATTRIBUTE_MODIFIED_VSEVT_CODE:
+			{
+				aci_gatt_attribute_modified_event_rp0 *mod = (aci_gatt_attribute_modified_event_rp0*)blecore_evt->data;
+
+				// Zápis do RX Charakteristiky (Ověření Handle)
+				if (mod->Attr_Handle == (RxCharHdle + 1))
+				{
+					BLE_Command_t cmd = (BLE_Command_t)mod->Attr_Data[0];
+
+					// Bezpečnostní pojistka: Kdyby ještě běžel starý přenos, natvrdo ho zrušíme
+					chunk_rem_len = 0;
+
+					// =========================================================
+					// ROZCESTNÍK PŘÍKAZŮ (COMMAND DICTIONARY)
+					// =========================================================
+					switch(cmd)
+					{
+						case CMD_READ_CONFIG: // CMD_READ_CONFIG
+							APP_DBG(">>> BLE CMD: READ CONFIG (0x10) - Odesilam %d bajtu", sizeof(BeaconConfig_t));
+							chunk_ptr = (uint8_t*)DEVICE_CONFIG;
+							chunk_rem_len = sizeof(BeaconConfig_t);
+							chunk_active_cmd = cmd;
+							UTIL_SEQ_SetTask(1 << CFG_TASK_BLE_CHUNKER, CFG_SCH_PRIO_0);
+							break;
+
+						case CMD_DOWNLOAD_CURRENT: // CMD_DOWNLOAD_CURRENT (Poslední stránka)
+						case CMD_DOWNLOAD_ALL: // CMD_DOWNLOAD_ALL (Celá historie)
+						case CMD_DOWNLOAD_SPECIFIC: // CMD_DOWNLOAD_SPECIFIC (S parametrem)
+						{
+							// Přečteme případný druhý bajt (parametr), pokud ho mobil poslal
+							uint8_t param = (mod->Attr_Data_Length >= 2) ? mod->Attr_Data[1] : 0;
+
+							uint8_t *data_ptr = NULL;
+							uint32_t data_len = 0;
+
+							// Zeptáme se Loggeru, kde data leží a kolik jich je
+							Logger_GetDownloadData(cmd, param, &data_ptr, &data_len);
+
+							if (data_len > 0 && data_ptr != NULL) {
+								APP_DBG(">>> BLE CMD: Odesilam LOGY (0x%02X) - Delka: %lu bajtu", cmd, data_len);
+
+								// Nabijeme Kráječ a spustíme střelbu!
+								chunk_ptr = data_ptr;
+								chunk_rem_len = data_len;
+								chunk_active_cmd = cmd;
+								UTIL_SEQ_SetTask(1 << CFG_TASK_BLE_CHUNKER, CFG_SCH_PRIO_0);
+							} else {
+								APP_DBG(">>> BLE CMD: Zadne logy k odeslani!");
+								// Odpovíme mobilu, že je paměť prázdná
+								uint8_t ack_empty[4] = {cmd, 0x00, 0x00, 0x00};
+								BLE_Tunnel_Send(ack_empty, 4);
+							}
+							break;
+						}
+
+						case CMD_IDENTIFY: // CMD_IDENTIFY (Najdi můj čip)
+							APP_DBG(">>> BLE CMD: IDENTIFY (0x40) - Zacinam signalizovat!");
+
+							// 10 vteřin blikání a pípání
+							System_Signalize_Start(10);
+
+							// Odpovíme mobilu, že úkol běží
+							uint8_t ack_id[4] = {0x40, 0x01, 0x00, 0x00};
+							BLE_Tunnel_Send(ack_id, 4);
+							break;
+
+						case CMD_SLEEP: // CMD_SLEEP (Návrat z BLE do MAC)
+							APP_DBG(">>> BLE CMD: SLEEP (0x51) - Zacinam slusne odpojovani...");
+
+							// Odpovíme mobilu, že povel přijímáme
+							uint8_t ack_sleep[4] = {0x51, 0x01, 0x00, 0x00};
+							BLE_Tunnel_Send(ack_sleep, 4);
+
+							sleep_pending = true; // Nastavíme vlajku, že chceme jít spát
+
+							// !!! OPRAVA GATT 133: Dáme koprocesoru 100 ms na fyzické odeslání !!!
+							HAL_Delay(100);
+
+							if (current_conn_handle != 0xFFFF) {
+								// 0x13 = Remote User Terminated Connection (Slusne odpojeni)
+								aci_gap_terminate(current_conn_handle, 0x13);
+							} else {
+								// Pojistka: Kdybychom handle neměli, přepneme rovnou
+								UTIL_SEQ_SetTask(1U << CFG_TASK_INIT_SWITCH_PROTOCOL, CFG_SCH_PRIO_0);
+							}
+							break;
+
+						// =====================================================
+						// 1A. KROK 1: MOBIL ŽÁDÁ O VÝZVU (0x05)
+						// Paket z mobilu: [0x05]
+						// =====================================================
+						case CMD_UNLOCK:
+							// Vygenerujeme náhodné číslo (Využijeme ticky procesoru a UDN čipu)
+							current_challenge = HAL_GetTick() ^ DEVICE_CONFIG->magic_word ^ LL_FLASH_GetUDN();
+
+							// Pokud by náhodou vyšla nula (neplatná výzva), změníme ji
+							if (current_challenge == 0) current_challenge = 0xDEADBEEF;
+
+							APP_DBG(">>> BLE SECURITY: Generuji vyzvu: %lu", current_challenge);
+
+							// Odešleme výzvu do mobilu (0x05 + 4 bajty výzvy)
+							uint8_t ack_chal[5] = {0x05,
+																		(current_challenge >> 24) & 0xFF,
+																		(current_challenge >> 16) & 0xFF,
+																		(current_challenge >> 8)  & 0xFF,
+																		 current_challenge        & 0xFF};
+							BLE_Tunnel_Send(ack_chal, 5);
+							break;
+
+						// =====================================================
+						// 1B. KROK 2: MOBIL POSÍLÁ RESPONSE K OVĚŘENÍ (0x07)
+						// Paket z mobilu: [0x07] [Resp_1] [Resp_2] [Resp_3] [Resp_4]
+						// =====================================================
+						case CMD_VERIFY_HASH:
+							if (mod->Attr_Data_Length >= 5) {
+								// Přečteme Response od mobilu
+								uint32_t received_response = ((uint32_t)mod->Attr_Data[1] << 24) |
+																						 ((uint32_t)mod->Attr_Data[2] << 16) |
+																						 ((uint32_t)mod->Attr_Data[3] << 8)  |
+																							(uint32_t)mod->Attr_Data[4];
+
+								// Vypočítáme si, co měl mobil reálně poslat (POUŽIJEME hash_device)
+								uint32_t expected_response = Generate_Response(current_challenge, DEVICE_CONFIG->hash_device);
+
+								// Ověření! (Zároveň kontrolujeme, že výzva byla vůbec vygenerována)
+								if (received_response == expected_response && current_challenge != 0) {
+									is_unlocked = true;
+									current_challenge = 0; // Výzva se smí použít jen jednou! (Obrana proti replay)
+
+									// Zkopírujeme aktuální stav z Flash do naší RAM (Stagingu)
+									memcpy(&staged_config, (void*)DEVICE_CONFIG, sizeof(BeaconConfig_t));
+
+									APP_DBG(">>> BLE SECURITY: ODEMCENO! Hash sedi. Relace spustena.");
+									uint8_t ack[4] = {0x07, 0x01, 0x00, 0x00}; BLE_Tunnel_Send(ack, 4);
+								} else {
+									APP_DBG(">>> BLE SECURITY: SPATNA ODPOVED! Utocnik?");
+									current_challenge = 0; // Při chybě výzvu okamžitě spálíme
+									uint8_t ack[4] = {0x07, 0xEE, 0x00, 0x00}; BLE_Tunnel_Send(ack, 4);
+								}
+							}
+							break;
+
+						// =====================================================
+						// 2. ZAMČENÍ RELACE (0x06)
+						// Paket: [0x06]
+						// =====================================================
+						case CMD_LOCK:
+							is_unlocked = false;
+							memset(&staged_config, 0, sizeof(BeaconConfig_t)); // Bezpečný výmaz RAM
+							APP_DBG(">>> BLE SECURITY: ZAMCENO uzivatelem.");
+							uint8_t ack_lock[4] = {0x06, 0x01, 0x00, 0x00}; BLE_Tunnel_Send(ack_lock, 4);
+							break;
+
+						// =====================================================
+						// 3. POSTUPNÉ SKLÁDÁNÍ DO RAM (0x12 - STAGE PARAMETER)
+						// Paket: [0x12] [ID] [Offset_H] [Offset_L] [Data...]
+						// =====================================================
+						case CMD_STAGE_PARAM:
+							if (!is_unlocked) {
+									APP_DBG(">>> BLE SECURITY: Zamitnuto (ZAMCENO)");
+									uint8_t ack[4] = {0x12, 0xEE, 0x00, 0x00}; BLE_Tunnel_Send(ack, 4);
+									break;
+							}
+
+							if (mod->Attr_Data_Length >= 5) {
+								Config_Param_t param_id = (Config_Param_t)mod->Attr_Data[1];
+								uint16_t offset = (mod->Attr_Data[2] << 8) | mod->Attr_Data[3];
+								uint8_t data_len = mod->Attr_Data_Length - 4;
+								uint8_t *payload = &mod->Attr_Data[4];
+
+								APP_DBG(">>> BLE STAGE: Param 0x%02X, Offset: %d, Delka: %d", param_id, offset, data_len);
+
+								// Úprava konkrétních proměnných KONTROLY v RAM
+								switch (param_id) {
+									// --- 1. ZÁKLADNÍ INFORMACE ---
+									case PARAM_BLE_DEVICE_NAME: if (offset + data_len <= 32) memcpy(&staged_config.BLE_device_name[offset], payload, data_len); break;
+									case PARAM_HASH_DEVICE: if (data_len >= 4) staged_config.hash_device = ((uint32_t)payload[0]<<24) | ((uint32_t)payload[1]<<16) | ((uint32_t)payload[2]<<8) | payload[3]; break;
+
+									// --- 2. VYSÍLANÉ INFORMACE ---
+									case PARAM_STAT_DEVICE_TYPE: if (data_len >= 2) staged_config.stat_device_type = ((uint16_t)payload[0]<<8) | payload[1]; break;
+									case PARAM_REQ_RSSI: if (data_len >= 1) staged_config.required_rssi = payload[0]; break;
+									case PARAM_EVENT_NATION: if (data_len >= 1) staged_config.event_nation = payload[0]; break;
+									case PARAM_EVENT_ID: if (data_len >= 4) staged_config.event_id = ((uint32_t)payload[0]<<24) | ((uint32_t)payload[1]<<16) | ((uint32_t)payload[2]<<8) | payload[3]; break;
+
+									// --- 3. NASTAVOVACÍ PARAMETRY ---
+									case PARAM_BEACON_PERIOD_MS: if (data_len >= 1) staged_config.beacon_period_ms = payload[0]; break;
+									case PARAM_BEACON_PERIOD_LP: if (data_len >= 1) staged_config.beacon_period_ms_lp = payload[0]; break;
+									case PARAM_BUZZER_ONOFF: if (data_len >= 1) staged_config.buzzer_onoff = payload[0]; break;
+									case PARAM_TX_POWER: if (data_len >= 1) staged_config.tx_power = (int8_t)payload[0]; break;
+									case PARAM_BAT_ALERT_THRESH: if (data_len >= 1) staged_config.battery_alert_threshold = payload[0]; break;
+
+									// --- 4. TEXTY A VLASTNÍK (Ukázka několika) ---
+									case PARAM_TEAM_OWNER: if (offset + data_len <= 64) memcpy(&staged_config.team_owner[offset], payload, data_len); break;
+									case PARAM_TEAM_EMAIL: if (offset + data_len <= 64) memcpy(&staged_config.team_email[offset], payload, data_len); break;
+									case PARAM_TEAM_OTHER_INFO: if (offset + data_len <= 1024) memcpy(&staged_config.team_other_info[offset], payload, data_len); break;
+									// (Zde si můžeš dopsat zbytek podle potřeby)
+
+									default:
+										APP_DBG(">>> BLE STAGE: Neznamy parametr (0x%02X)", param_id);
+										uint8_t ack_err[4] = {0x12, 0xEE, param_id, 0x00}; BLE_Tunnel_Send(ack_err, 4);
+										break;
+								}
+
+								uint8_t ack[4] = {0x12, 0x01, param_id, 0x00}; BLE_Tunnel_Send(ack, 4);
+							}
+							break;
+
+						// =====================================================
+						// 4. HROMADNÝ ZÁPIS DO FLASH (0x13 - COMMIT)
+						// Paket: [0x13]
+						// =====================================================
+						case CMD_COMMIT_CONFIG:
+							if (!is_unlocked) {
+								uint8_t ack[4] = {0x13, 0xEE, 0x00, 0x00}; BLE_Tunnel_Send(ack, 4);
+								break;
+							}
+
+							APP_DBG(">>> BLE COMMIT: Zapisuji vsechny RAM upravy do Flash!");
+							Config_Commit(&staged_config);
+
+							uint8_t ack_com[4] = {0x13, 0x01, 0x00, 0x00}; BLE_Tunnel_Send(ack_com, 4);
+							break;
+
+						// =====================================================
+						// 5. BEZPEČNÝ FORMÁT PAMĚTI (0x99)
+						// Nyní nevyžaduje PIN v paketu, protože je chráněn zámkem!
+						// =====================================================
+						case CMD_FORMAT_HISTORY:
+							if (!is_unlocked) {
+								APP_DBG(">>> BLE SECURITY: Zamitnuto - Formát vyžaduje odemknuti!");
+								uint8_t ack[4] = {0x99, 0xEE, 0x00, 0x00}; BLE_Tunnel_Send(ack, 4);
+								break;
+							}
+
+							APP_DBG(">>> BLE CMD: FORMATOVANI PAMETI ZAVODNIKA! (0x99)");
+							chunk_rem_len = 0;
+							Logger_FormatAll();
+							uint8_t ack_fmt[4] = {0x99, 0x01, 0x00, 0x00}; BLE_Tunnel_Send(ack_fmt, 4);
+							break;
+						//}
+
+						// =====================================================
+						// 6. FACTORY RESET POUZE KONFIGURACE (0x97)
+						// =====================================================
+						case CMD_RESET_CONFIG:
+							if (!is_unlocked) {
+								uint8_t ack[4] = {0x97, 0xEE, 0x00, 0x00}; BLE_Tunnel_Send(ack, 4);
+								break;
+							}
+
+							// Odešleme mobilu zprávu o úspěchu ještě PŘED restartem
+							uint8_t ack_97[4] = {0x97, 0x01, 0x00, 0x00};
+							BLE_Tunnel_Send(ack_97, 4);
+
+							// Necháme paket 100 ms odletět a pak desku zabijeme
+							HAL_Delay(100);
+							Config_EraseAndReboot();
+							break;
+
+						// =====================================================
+						// 7. KOMPLETNÍ FACTORY RESET - VŠE (0x98)
+						// =====================================================
+						case CMD_RESET_ALL:
+							if (!is_unlocked) {
+								uint8_t ack[4] = {0x98, 0xEE, 0x00, 0x00}; BLE_Tunnel_Send(ack, 4);
+								break;
+							}
+
+							// Odešleme mobilu zprávu o úspěchu ještě PŘED restartem
+							uint8_t ack_98[4] = {0x98, 0x01, 0x00, 0x00};
+							BLE_Tunnel_Send(ack_98, 4);
+
+							// Necháme paket 100 ms odletět a pak spustíme kompletní destrukci
+							HAL_Delay(100);
+							System_FactoryResetAll();
+							break;
+
+						default:
+							APP_DBG(">>> BLE CMD: NEZNAMY PRIKAZ (0x%02X)", cmd);
+							break;
+					}
+				}
+				break;
+			}
+		}
+	}
+	return SVCCTL_EvtNotAck;
+}
+
+// -----------------------------------------------------------------------------
+// INICIALIZACE: Registrace Služeb do BLE Stacku
+// -----------------------------------------------------------------------------
+void P2PS_APP_Init(void) {
+	Char_UUID_t uuid;
+
+	// Zaregistrujeme obsluhu BLE událostí
+	SVCCTL_RegisterSvcHandler(Tunnel_Event_Handler);
+
+	// Zaregistrujeme náš asynchronní úkol (Kráječ)
+	UTIL_SEQ_RegTask(1 << CFG_TASK_BLE_CHUNKER, UTIL_SEQ_RFU, BLE_Chunker_Task);
+
+	// 1. Přidání Služby
+	COPY_SERVICE_UUID(uuid.Char_UUID_128);
+	aci_gatt_add_service(UUID_TYPE_128, (Service_UUID_t *) &uuid, PRIMARY_SERVICE, 7, &OrienteeringServiceHdle);
+
+	// 2. Přidání RX Charakteristiky (Mobil píše nám)
+	uuid.Char_UUID_128[12] = 0x41; // RX UUID
+	aci_gatt_add_char(OrienteeringServiceHdle, UUID_TYPE_128, &uuid, 244,
+										CHAR_PROP_WRITE | CHAR_PROP_WRITE_WITHOUT_RESP,
+										ATTR_PERMISSION_NONE, GATT_NOTIFY_ATTRIBUTE_WRITE, 10, 1, &RxCharHdle);
+
+	// 3. Přidání TX Charakteristiky (My posíláme mobilu přes Notifikace)
+	uuid.Char_UUID_128[12] = 0x42; // TX UUID
+	aci_gatt_add_char(OrienteeringServiceHdle, UUID_TYPE_128, &uuid, 244,
+										CHAR_PROP_NOTIFY,
+										ATTR_PERMISSION_NONE, GATT_DONT_NOTIFY_EVENTS, 10, 1, &TxCharHdle);
+
+	APP_DBG(">>> BLE TUNEL: Inicializovano a pripraveno!");
+}
+
+void BLE_Tunnel_Send(uint8_t *pPayload, uint16_t length) {
+	aci_gatt_update_char_value(OrienteeringServiceHdle, TxCharHdle, 0, length, pPayload);
+}
+
+// -----------------------------------------------------------------------------
+// CALLBACK: Stav připojení (Volá se z app_ble.c)
+// -----------------------------------------------------------------------------
 void P2PS_APP_Notification(P2PS_APP_ConnHandle_Not_evt_t *pNotification)
 {
-/* USER CODE BEGIN P2PS_APP_Notification_1 */
+	switch (pNotification->P2P_Evt_Opcode)
+	{
+		case PEER_CONN_HANDLE_EVT:
+			APP_DBG(">>> BLE TUNEL: Mobil pripojen!");
+			current_conn_handle = pNotification->ConnectionHandle; // Uložíme si Handle
+			break;
 
-/* USER CODE END P2PS_APP_Notification_1 */
-  switch(pNotification->P2P_Evt_Opcode)
-  {
-/* USER CODE BEGIN P2PS_APP_Notification_P2P_Evt_Opcode */
+		case PEER_DISCON_HANDLE_EVT:
+			APP_DBG(">>> BLE TUNEL: Mobil odpojen!");
+			current_conn_handle = 0xFFFF; // Vymažeme Handle
+			chunk_rem_len = 0;
 
-/* USER CODE END P2PS_APP_Notification_P2P_Evt_Opcode */
-  case PEER_CONN_HANDLE_EVT :
-/* USER CODE BEGIN PEER_CONN_HANDLE_EVT */
-          
-/* USER CODE END PEER_CONN_HANDLE_EVT */
-    break;
+			// BEZPEČNOST: Automaticky zamknout a smazat RAM buffer
+			is_unlocked = false;
+			memset(&staged_config, 0, sizeof(BeaconConfig_t));
 
-    case PEER_DISCON_HANDLE_EVT :
-/* USER CODE BEGIN PEER_DISCON_HANDLE_EVT */
-       P2PS_APP_LED_BUTTON_context_Init();       
-/* USER CODE END PEER_DISCON_HANDLE_EVT */
-    break;
-    
-    default:
-/* USER CODE BEGIN P2PS_APP_Notification_default */
+			if (sleep_pending) {
+				// Pokud mobil inicioval spánek (nebo jsme ho vykopli my přes CMD_SLEEP)
+				sleep_pending = false;
+				APP_DBG(">>> BLE TUNEL: Provedeno slusne odpojeni. Prepinam na MAC!");
+				UTIL_SEQ_SetTask(1U << CFG_TASK_INIT_SWITCH_PROTOCOL, CFG_SCH_PRIO_0);
+			} else {
+				APP_DBG(">>> BLE SECURITY: Spojeni ztraceno -> AUTO-LOCK aktivovan!");
+			}
+			break;
 
-/* USER CODE END P2PS_APP_Notification_default */
-      break;
-  }
-/* USER CODE BEGIN P2PS_APP_Notification_2 */
-
-/* USER CODE END P2PS_APP_Notification_2 */
-  return;
+		default:
+			break;
+	}
 }
 
-void P2PS_APP_Init(void)
+// -----------------------------------------------------------------------------
+// CHYBĚJÍCÍ FUNKCE (Signalizace a ST Middleware)
+// -----------------------------------------------------------------------------
+
+// Funkce pro CMD_IDENTIFY (Zatím jen rozsvítíme modrou LED)
+void System_Signalize_Start(uint8_t seconds)
 {
-/* USER CODE BEGIN P2PS_APP_Init */
-  UTIL_SEQ_RegTask( 1<< CFG_TASK_SW1_BUTTON_PUSHED_ID, UTIL_SEQ_RFU, P2PS_Send_Notification );
-
-  /**
-   * Initialize LedButton Service
-   */
-  P2P_Server_App_Context.Notification_Status=0; 
-  P2PS_APP_LED_BUTTON_context_Init();
-/* USER CODE END P2PS_APP_Init */
-  return;
+	APP_DBG(">>> SIGNALIZACE: %d sekund", seconds);
+	BSP_LED_On(LED_BLUE);
+	// (Případně sem později napojíme časovač na blikání)
 }
 
-/* USER CODE BEGIN FD */
-void P2PS_APP_LED_BUTTON_context_Init(void){
-  
-  BSP_LED_Off(LED_RED);
-  
-  #if(P2P_SERVER1 != 0)
-  P2P_Server_App_Context.LedControl.Device_Led_Selection=0x01; /* Device1 */
-  P2P_Server_App_Context.LedControl.Led1=0x00; /* led OFF */
-  P2P_Server_App_Context.ButtonControl.Device_Button_Selection=0x01;/* Device1 */
-  P2P_Server_App_Context.ButtonControl.ButtonStatus=0x00;
-#endif
-#if(P2P_SERVER2 != 0)
-  P2P_Server_App_Context.LedControl.Device_Led_Selection=0x02; /* Device2 */
-  P2P_Server_App_Context.LedControl.Led1=0x00; /* led OFF */
-  P2P_Server_App_Context.ButtonControl.Device_Button_Selection=0x02;/* Device2 */
-  P2P_Server_App_Context.ButtonControl.ButtonStatus=0x00;
-#endif  
-#if(P2P_SERVER3 != 0)
-  P2P_Server_App_Context.LedControl.Device_Led_Selection=0x03; /* Device3 */
-  P2P_Server_App_Context.LedControl.Led1=0x00; /* led OFF */
-  P2P_Server_App_Context.ButtonControl.Device_Button_Selection=0x03; /* Device3 */
-  P2P_Server_App_Context.ButtonControl.ButtonStatus=0x00;
-#endif
-#if(P2P_SERVER4 != 0)
-  P2P_Server_App_Context.LedControl.Device_Led_Selection=0x04; /* Device4 */
-  P2P_Server_App_Context.LedControl.Led1=0x00; /* led OFF */
-  P2P_Server_App_Context.ButtonControl.Device_Button_Selection=0x04; /* Device4 */
-  P2P_Server_App_Context.ButtonControl.ButtonStatus=0x00;
-#endif  
- #if(P2P_SERVER5 != 0)
-  P2P_Server_App_Context.LedControl.Device_Led_Selection=0x05; /* Device5 */
-  P2P_Server_App_Context.LedControl.Led1=0x00; /* led OFF */
-  P2P_Server_App_Context.ButtonControl.Device_Button_Selection=0x05; /* Device5 */
-  P2P_Server_App_Context.ButtonControl.ButtonStatus=0x00;
-#endif
-#if(P2P_SERVER6 != 0)
-  P2P_Server_App_Context.LedControl.Device_Led_Selection=0x06; /* device6 */
-  P2P_Server_App_Context.LedControl.Led1=0x00; /* led OFF */
-  P2P_Server_App_Context.ButtonControl.Device_Button_Selection=0x06; /* Device6 */
-  P2P_Server_App_Context.ButtonControl.ButtonStatus=0x00;
-#endif  
-}
-
-void P2PS_APP_SW1_Button_Action(void)
-{
-  UTIL_SEQ_SetTask( 1<<CFG_TASK_SW1_BUTTON_PUSHED_ID, CFG_SCH_PRIO_0);
-
-  return;
-}
-/* USER CODE END FD */
-
-/*************************************************************
- *
- * LOCAL FUNCTIONS
- *
- *************************************************************/
-/* USER CODE BEGIN FD_LOCAL_FUNCTIONS*/
-void P2PS_Send_Notification(void)
-{
- 
-  if(P2P_Server_App_Context.ButtonControl.ButtonStatus == 0x00){
-    P2P_Server_App_Context.ButtonControl.ButtonStatus=0x01;
-  } else {
-    P2P_Server_App_Context.ButtonControl.ButtonStatus=0x00;
-  }
-  
-   if(P2P_Server_App_Context.Notification_Status){ 
-    APP_DBG_MSG("-- P2P APPLICATION SERVER  : INFORM CLIENT BUTTON 1 PUSHED \n ");
-    APP_DBG_MSG(" \n\r");
-    P2PS_STM_App_Update_Char(P2P_NOTIFY_CHAR_UUID, (uint8_t *)&P2P_Server_App_Context.ButtonControl);
-   } else {
-    APP_DBG_MSG("-- P2P APPLICATION SERVER : CAN'T INFORM CLIENT -  NOTIFICATION DISABLED\n "); 
-   }
-
-  return;
-}
-
-/* USER CODE END FD_LOCAL_FUNCTIONS*/

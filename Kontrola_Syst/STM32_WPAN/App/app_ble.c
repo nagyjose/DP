@@ -32,6 +32,9 @@
 #include "otp.h"
 #include "p2p_server_app.h"
 
+#include <string.h>    // PŘIDÁNO: Pro práci s textem (strlen, memcpy)
+#include "app_conf.h"  // PŘIDÁNO: Pro přístup k DEVICE_CONFIG
+
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 
@@ -173,8 +176,9 @@ typedef struct
 
 /* Private defines -----------------------------------------------------------*/
 #define APPBLE_GAP_DEVICE_NAME_LENGTH 7
-#define FAST_ADV_TIMEOUT               (30*1000*1000/CFG_TS_TICK_VAL) /**< 30s */
-#define INITIAL_ADV_TIMEOUT            (60*1000*1000/CFG_TS_TICK_VAL) /**< 60s */
+// 15 minut = 900 vteřin * 1000 * 1000 / CFG_TS_TICK_VAL
+#define FAST_ADV_TIMEOUT               (900*1000*1000/CFG_TS_TICK_VAL)
+#define INITIAL_ADV_TIMEOUT            (900*1000*1000/CFG_TS_TICK_VAL)
 
 #define BD_ADDR_SIZE_LOCAL    6
 
@@ -226,7 +230,7 @@ uint8_t index_con_int, mutex;
  * Advertising Data
  */
 #if (P2P_SERVER1 != 0)
-static const char local_name[] = { AD_TYPE_COMPLETE_LOCAL_NAME ,'P','2','P','S','R','V','1'};
+//static const char local_name[] = { AD_TYPE_COMPLETE_LOCAL_NAME ,'P','2','P','S','R','V','1'};
 uint8_t manuf_data[14] = {
     sizeof(manuf_data)-1, AD_TYPE_MANUFACTURER_SPECIFIC_DATA, 
     0x01/*SKD version */,
@@ -542,36 +546,31 @@ SVCCTL_UserEvtFlowStatus_t SVCCTL_App_Notification( void *p_Pckt )
           
           HW_TS_Stop(BleApplicationContext.Advertising_mgr_timer_Id);
 
-            APP_DBG_MSG("HCI_LE_CONNECTION_COMPLETE_SUBEVT_CODE for connection handle 0x%x\n",
-                      connection_complete_event->Connection_Handle);
+					APP_DBG_MSG("HCI_LE_CONNECTION_COMPLETE_SUBEVT_CODE for connection handle 0x%x\n",
+										connection_complete_event->Connection_Handle);
 
-            if (BleApplicationContext.Device_Connection_Status == APP_BLE_LP_CONNECTING)
-            {
-              /* Connection as client */
-              BleApplicationContext.Device_Connection_Status = APP_BLE_CONNECTED_CLIENT;
-            }
-            else
-            {
-              /* Connection as server */
-              BleApplicationContext.Device_Connection_Status = APP_BLE_CONNECTED_SERVER;
-            }
-            
-            BleApplicationContext.BleApplicationContext_legacy.connectionHandle =
-                connection_complete_event->Connection_Handle;
- /*
-* SPECIFIC to P2P Server APP
-*/             
+					if (BleApplicationContext.Device_Connection_Status == APP_BLE_LP_CONNECTING)
+					{
+						/* Connection as client */
+						BleApplicationContext.Device_Connection_Status = APP_BLE_CONNECTED_CLIENT;
+					}
+					else
+					{
+						/* Connection as server */
+						BleApplicationContext.Device_Connection_Status = APP_BLE_CONNECTED_SERVER;
+					}
+
+					BleApplicationContext.BleApplicationContext_legacy.connectionHandle =
+							connection_complete_event->Connection_Handle;
+
+					 /*
+					* SPECIFIC to P2P Server APP
+					*/
           HandleNotification.P2P_Evt_Opcode = PEER_CONN_HANDLE_EVT;
           HandleNotification.ConnectionHandle = BleApplicationContext.BleApplicationContext_legacy.connectionHandle;
           P2PS_APP_Notification(&HandleNotification);
           /* USER CODE BEGIN HCI_EVT_LE_CONN_COMPLETE */
- /*
-* SPECIFIC to P2P Server APP
-*/             
-          HandleNotification.P2P_Evt_Opcode = PEER_CONN_HANDLE_EVT;
-          HandleNotification.ConnectionHandle = BleApplicationContext.BleApplicationContext_legacy.connectionHandle;
-          P2PS_APP_Notification(&HandleNotification);
-/**/
+
           /* USER CODE END HCI_EVT_LE_CONN_COMPLETE */
           }
         break; /* HCI_EVT_LE_CONN_COMPLETE */
@@ -641,7 +640,7 @@ APP_BLE_ConnStatus_t APP_BLE_Get_Server_Connection_Status(void)
 /* USER CODE BEGIN FD*/
 void APP_BLE_Key_Button1_Action(void)
 {
-  P2PS_APP_SW1_Button_Action();
+  //P2PS_APP_SW1_Button_Action();
 }
 
 void APP_BLE_Key_Button2_Action(void)
@@ -835,91 +834,106 @@ static void Ble_Tl_Init( void )
    }
 }
 
-static void Adv_Request(APP_BLE_ConnStatus_t New_Status)
+static void Adv_Request(APP_BLE_ConnStatus_t NewStatus)
 {
-  tBleStatus ret = BLE_STATUS_INVALID_PARAMS;
-  uint16_t Min_Inter, Max_Inter;
- 
-  if (New_Status == APP_BLE_FAST_ADV)
-  {
-    Min_Inter = AdvIntervalMin;
-    Max_Inter = AdvIntervalMax;
-  }
-  else
-  {
-    Min_Inter = CFG_LP_CONN_ADV_INTERVAL_MIN;
-    Max_Inter = CFG_LP_CONN_ADV_INTERVAL_MAX;
-  }
+	tBleStatus ret = BLE_STATUS_INVALID_PARAMS;
+	uint16_t Min_Inter, Max_Inter;
 
-    /**
-     * Stop the timer, it will be restarted for a new shot
-     * It does not hurt if the timer was not running
-     */
-    HW_TS_Stop(BleApplicationContext.Advertising_mgr_timer_Id);
+	if (NewStatus == APP_BLE_FAST_ADV)
+	{
+		Min_Inter = AdvIntervalMin;
+		Max_Inter = AdvIntervalMax;
+	}
+	else
+	{
+		Min_Inter = CFG_LP_CONN_ADV_INTERVAL_MIN;
+		Max_Inter = CFG_LP_CONN_ADV_INTERVAL_MAX;
+	}
 
-     APP_DBG_MSG("First index in %d state \n",
-                BleApplicationContext.Device_Connection_Status);
+	// =========================================================================
+	// 1. BEZPEČNÉ VYČTENÍ JMÉNA Z VOLATILE FLASH PAMĚTI
+	// =========================================================================
+	char temp_name[32] = {0};
 
-    if ((New_Status == APP_BLE_LP_ADV)
-        && ((BleApplicationContext.Device_Connection_Status == APP_BLE_FAST_ADV)
-            || (BleApplicationContext.Device_Connection_Status == APP_BLE_LP_ADV)))
-    {
-      /* Connection in ADVERTISE mode have to stop the current advertising */
-      ret = aci_gap_set_non_discoverable();
-      if (ret == BLE_STATUS_SUCCESS)
-      {
-        APP_DBG_MSG("Successfully Stopped Advertising");
-      }
-      else
-      {
-        APP_DBG_MSG("Stop Advertising Failed , result: %d \n", ret);
-      }
-    }
+	// Kopírujeme bajt po bajtu, dokud nenarazíme na konec textu (\0)
+	for(int i = 0; i < 31; i++) {
+		temp_name[i] = DEVICE_CONFIG->BLE_device_name[i];
+		if(temp_name[i] == '\0') break;
+	}
+	temp_name[31] = '\0'; // Pojistka proti přetečení
 
-    BleApplicationContext.Device_Connection_Status = New_Status;
-    /* Start Fast or Low Power Advertising */
-    ret = aci_gap_set_discoverable(
-        ADV_IND,
-        Min_Inter,
-        Max_Inter,
-        GAP_PUBLIC_ADDR,
-        NO_WHITE_LIST_USE, /* use white list */
-        sizeof(local_name),
-        (uint8_t*) &local_name,
-        BleApplicationContext.BleApplicationContext_legacy.advtServUUIDlen,
-        BleApplicationContext.BleApplicationContext_legacy.advtServUUID,
-        0,
-        0);
-    /* Update Advertising data */
-    ret = aci_gap_update_adv_data(sizeof(manuf_data), (uint8_t*) manuf_data);
+	uint8_t name_len = strlen(temp_name);
 
-     if (ret == BLE_STATUS_SUCCESS)
-    {
-      if (New_Status == APP_BLE_FAST_ADV)
-      {
-        APP_DBG_MSG("Successfully Start Fast Advertising \n" );
-        /* Start Timer to STOP ADV - TIMEOUT */
-        HW_TS_Start(BleApplicationContext.Advertising_mgr_timer_Id, INITIAL_ADV_TIMEOUT);
-      }
-      else
-      {
-        APP_DBG_MSG("Successfully Start Low Power Advertising \n");
-      }
-    }
-    else
-    {
-      if (New_Status == APP_BLE_FAST_ADV)
-      {
-        APP_DBG_MSG("Start Fast Advertising Failed , result: %d \n", ret);
-      }
-      else
-      {
-        APP_DBG_MSG("Start Low Power Advertising Failed , result: %d \n", ret);
-      }
-    }
+	// Ochrana: Kdyby byl čip vymazaný, dáme záchranné jméno
+	if (name_len == 0) {
+		strcpy(temp_name, "Neznamy");
+		name_len = 7;
+	} else if (name_len > 25) {
+		// Ochrana BLE paketu - jméno nesmí zabrat celých 31 bajtů
+		name_len = 25;
+	}
 
-  return;
+	// =========================================================================
+	// 2. SESTAVENÍ POLE PRO BLE ADVERTISING
+	// =========================================================================
+	uint8_t local_name[32];
+
+	// BLE vyžaduje, aby první bajt určoval typ informace (Zde: Kompletní jméno)
+	local_name[0] = AD_TYPE_COMPLETE_LOCAL_NAME;
+
+	// Za tento typ nakopírujeme samotné jméno
+	memcpy(&local_name[1], temp_name, name_len);
+
+	// Celková velikost k odeslání je délka jména + 1 bajt (AD_TYPE)
+	uint8_t local_name_size = name_len + 1;
+
+	uint8_t adv_data[] =
+	{
+	 0x02,AD_TYPE_TX_POWER_LEVEL,0x00, /* 0 dBm */
+	 /* Manufacturer specific data */
+	 0x06, AD_TYPE_MANUFACTURER_SPECIFIC_DATA, 0x30, 0x00, 0x00, 0x00, 0x00
+	};
+
+	// =========================================================================
+	// 3. REGISTRACE DO BLUETOOTH VYSÍLAČE
+	// =========================================================================
+	ret = aci_gap_set_discoverable(
+		ADV_IND,
+		Min_Inter,
+		Max_Inter,
+		GAP_PUBLIC_ADDR,
+		NO_WHITE_LIST_USE, /* use white list */
+		local_name_size,   /* NAŠE DYNAMICKÁ VELIKOST */
+		local_name,        /* NAŠE DYNAMICKÉ JMÉNO */
+		sizeof(adv_data),
+		(uint8_t*) &adv_data,
+		0,
+		0);
+
+	/* Update Advertising data */
+	//ret = aci_gap_update_adv_data(sizeof(adv_data), (uint8_t*) &adv_data);
+
+	if (ret == BLE_STATUS_SUCCESS)
+	{
+		if (NewStatus == APP_BLE_FAST_ADV)
+		{
+			APP_DBG("  \r\n\r");
+			APP_DBG("** ADV START FAST ** \r\n\r");
+		}
+		else
+		{
+			APP_DBG("  \r\n\r");
+			APP_DBG("** ADV START LP ** \r\n\r");
+		}
+	}
+	else
+	{
+		APP_DBG("** ADV START FAILED ** \r\n\r");
+	}
+
+	return;
 }
+
 
 const uint8_t* BleGetBdAddress( void )
 {
@@ -1012,13 +1026,10 @@ static void Adv_Cancel( void )
 
 static void Adv_Cancel_Req( void )
 {
-/* USER CODE BEGIN Adv_Cancel_Req_1 */
+  APP_DBG(">>> BLE TIMEOUT (15 min): Vypinam BLE a vracim se k MAC Sniffingu <<<");
 
-/* USER CODE END Adv_Cancel_Req_1 */
-  UTIL_SEQ_SetTask(1 << CFG_TASK_ADV_CANCEL_ID, CFG_SCH_PRIO_0);
-/* USER CODE BEGIN Adv_Cancel_Req_2 */
-
-/* USER CODE END Adv_Cancel_Req_2 */
+  // Zastavíme Bluetooth a probudíme 802.15.4 MAC
+  UTIL_SEQ_SetTask(1U << CFG_TASK_INIT_SWITCH_PROTOCOL, CFG_SCH_PRIO_0);
   return;
 }
 

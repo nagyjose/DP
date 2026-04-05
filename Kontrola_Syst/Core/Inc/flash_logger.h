@@ -22,5 +22,10 @@ typedef union {
 void Logger_Init(void);
 void Config_Init(void);
 void Logger_SavePunch_Kontrola(uint8_t* id_3bytes, uint8_t sub_sec, uint32_t unix_time);
+void Logger_GetDownloadData(uint8_t cmd, uint8_t param, uint8_t **start_ptr, uint32_t *len);
+void Logger_FormatAll(void);
+void Config_Commit(BeaconConfig_t *new_cfg); // Změněno na BeaconConfig_t!
+void Config_EraseAndReboot(void);
+void System_FactoryResetAll(void);
 
 #endif /* FLASH_LOGGER_H */

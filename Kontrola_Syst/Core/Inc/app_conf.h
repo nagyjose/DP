@@ -573,7 +573,7 @@ typedef enum
   CFG_TASK_INIT_SWITCH_PROTOCOL,
   CFG_TASK_ACTIVATE_PROTOCOL,
 
-
+	CFG_TASK_BLE_CHUNKER,      /* <--- PŘIDÁNO: Task pro BLE Tunel */
 
   CFG_LAST_TASK_ID_WITH_HCICMD, /**< Shall be LAST in the list */
 } CFG_Task_Id_With_HCI_Cmd_t;
@@ -745,38 +745,38 @@ typedef enum
 
 #define TL_EVENT_FRAME_SIZE ( TL_EVT_HDR_SIZE + CFG_TL_MOST_EVENT_PAYLOAD_SIZE )
 
-// =========================================================================
-// KONFIGURACE KONTROLY (Ukládání na Nultou stránku)
-// =========================================================================
-#define CONFIG_FLASH_ADDR 0x08020000 // Adresa 32. stránky (Nultý blok dat)
+#define CONFIG_FLASH_ADDR 0x08020000 // Nultá stránka pro konfiguraci
 
+// =========================================================================
+// STRUKTURA KONTROLY / BEACONU (1592 bytů celkem -> zarovnáno na 8)
+// =========================================================================
 typedef struct {
 	// Informace o zařízení (122 bytů)
-	uint32_t magic_word;        // 0xCAFECAFE
-	uint32_t control_sum;       // CRC-32 celé stránky
-	char     hw_revision[32];   // Verze hardware
-	char     fw_version[32];    // Verze firmware (Git Hash)
+	uint32_t magic_word;
+	uint32_t control_sum;
+	char     hw_revision[32];
+	char     fw_version[32];
 	uint32_t manuf_date;
 	uint32_t battery_age;
 	uint32_t last_config;
 	uint16_t page_overwrite;
 	char     BLE_device_name[32];
-	uint32_t hash_device;       // Bezpečnostní kód pro BLE
+	uint32_t hash_device;
 
 	// Vysílané informace (8 bytů)
-	uint16_t stat_device_type;  // ID kontroly (12 bitů)
+	uint16_t stat_device_type;
 	uint8_t  required_rssi;
 	uint8_t  event_nation;
-	uint32_t event_id;          // ID akce (20 bitů)
+	uint32_t event_id;
 
-	// Nastavovací/parametrické informace (5 bytů)
+	// Nastavovací parametry (5 bytů)
 	uint8_t  beacon_period_ms;
 	uint8_t  beacon_period_ms_lp;
 	uint8_t  buzzer_onoff;
 	int8_t   tx_power;
 	uint8_t  battery_alert_threshold;
 
-	// Informace o kontrole (1450 bytů)
+	// Informace o vlastníkovi (1450 bytů)
 	char     team_owner[64];
 	char     team_shortcut[4];
 	char     team_nation[4];
@@ -790,13 +790,14 @@ typedef struct {
 	uint16_t team_orisid;
 	char     team_other_info[1024];
 
-	// Padding (Zarovnání na 1592 bytů, dělitelné 8)
-	char     padding[7];
+	char     padding[7]; // Zarovnání
 
 } __attribute__((packed)) BeaconConfig_t;
 
 // Globální ukazatel přímo do Flash paměti
 #define DEVICE_CONFIG ((volatile BeaconConfig_t *)CONFIG_FLASH_ADDR)
+
+void Config_Init(void);
 
 #endif /* APP_CONF_H */
 

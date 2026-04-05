@@ -15,65 +15,38 @@
   *
   ******************************************************************************
   */
-/* USER CODE END Header */
 
-/* Define to prevent recursive inclusion -------------------------------------*/
-#ifndef __P2P_SERVER_APP_H
-#define __P2P_SERVER_APP_H
+#ifndef P2P_SERVER_APP_H
+#define P2P_SERVER_APP_H
 
-#ifdef __cplusplus
-extern "C" {
-#endif
+#include "app_common.h"
+#include "ble.h"
 
-/* Includes ------------------------------------------------------------------*/
+// Definice událostí pro náš tunel
+typedef enum {
+    BLE_TUNNEL_RX_EVT,        // Mobil poslal data nám (příkaz)
+    BLE_TUNNEL_NOTIFY_ENABLED, // Mobil zapnul poslech (ikonka šipek v nRF Connect)
+    BLE_TUNNEL_NOTIFY_DISABLED
+} BLE_Tunnel_Evt_t;
 
-/* Private includes ----------------------------------------------------------*/
-/* USER CODE BEGIN Includes */
-
-/* USER CODE END Includes */
-
-/* Exported types ------------------------------------------------------------*/
+// --- Zpětná kompatibilita pro app_ble.c (události připojení/odpojení) ---
 typedef enum
 {
   PEER_CONN_HANDLE_EVT,
   PEER_DISCON_HANDLE_EVT,
-} P2PS_APP__Opcode_Notification_evt_t;
+} P2PS_APP_Opcode_Notification_evt_t;
 
 typedef struct
 {
-  P2PS_APP__Opcode_Notification_evt_t   P2P_Evt_Opcode;
-  uint16_t                              ConnectionHandle;
-}P2PS_APP_ConnHandle_Not_evt_t;
-/* USER CODE BEGIN ET */
+  P2PS_APP_Opcode_Notification_evt_t   P2P_Evt_Opcode;
+  uint16_t                             ConnectionHandle;
+} P2PS_APP_ConnHandle_Not_evt_t;
 
-/* USER CODE END ET */
 
-/* Exported constants --------------------------------------------------------*/
-/* USER CODE BEGIN EC */
+// Funkce, které budeme volat zvenčí
+void P2PS_APP_Init(void);
+void P2PS_APP_Notification(P2PS_APP_ConnHandle_Not_evt_t *pNotification);
+void BLE_Tunnel_Send(uint8_t *pPayload, uint16_t length);
 
-/* USER CODE END EC */
-
-/* External variables --------------------------------------------------------*/
-/* USER CODE BEGIN EV */
-
-/* USER CODE END EV */
-
-/* Exported macros ------------------------------------------------------------*/
-/* USER CODE BEGIN EM */
-
-/* USER CODE END EM */
-
-/* Exported functions ---------------------------------------------*/
-  void P2PS_APP_Init( void );
-  void P2PS_APP_Notification( P2PS_APP_ConnHandle_Not_evt_t *pNotification );
-/* USER CODE BEGIN EF */
-  void P2PS_APP_SW1_Button_Action( void );
-
-/* USER CODE END EF */
-
-#ifdef __cplusplus
-}
-#endif
-
-#endif /*__P2P_SERVER_APP_H */
+#endif /* P2P_SERVER_APP_H */
 

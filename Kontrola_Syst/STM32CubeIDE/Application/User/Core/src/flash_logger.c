@@ -213,3 +213,58 @@ void Config_Init(void)
 	}
 }
 
+// =============================================================================
+// ROZHRANÍ PRO BLE TUNEL (Ukládání, Mazání, Vyčítání)
+// =============================================================================
+
+void Config_Commit(BeaconConfig_t *new_cfg)
+{
+	EraseConfigPage();
+	uint8_t *data_ptr = (uint8_t*)new_cfg;
+	uint32_t flash_ptr = CONFIG_FLASH_ADDR;
+	uint32_t double_words_count = sizeof(BeaconConfig_t) / 8;
+
+	HAL_FLASH_Unlock();
+	__HAL_FLASH_CLEAR_FLAG(FLASH_FLAG_OPTVERR | FLASH_FLAG_EOP | FLASH_FLAG_WRPERR | FLASH_FLAG_PGSERR);
+	for (uint32_t i = 0; i < double_words_count; i++) {
+		uint64_t double_word_to_write = 0;
+		memcpy(&double_word_to_write, data_ptr + (i * 8), 8);
+		HAL_FLASH_Program(FLASH_TYPEPROGRAM_DOUBLEWORD, flash_ptr, double_word_to_write);
+		flash_ptr += 8;
+	}
+	HAL_FLASH_Lock();
+	APP_DBG("CONFIG: Nova konfigurace ulozena!");
+}
+
+void Config_EraseAndReboot(void)
+{
+	EraseConfigPage();
+	NVIC_SystemReset();
+}
+
+void Logger_FormatAll(void)
+{
+	APP_DBG("LOGGER: Formatuji celou pamet...");
+	for (int i = 0; i < LOGGER_MAX_PAGES; i++) {
+		ErasePage(LOGGER_START_ADDR + (i * LOGGER_PAGE_SIZE));
+	}
+	current_flash_ptr = LOGGER_START_ADDR;
+	current_punch_index = 0;
+	APP_DBG("LOGGER: Formatovani dokonceno!");
+}
+
+void System_FactoryResetAll(void)
+{
+	Logger_FormatAll();
+	EraseConfigPage();
+	NVIC_SystemReset();
+}
+
+void Logger_GetDownloadData(uint8_t cmd, uint8_t param, uint8_t **start_ptr, uint32_t *len)
+{
+	// Kontrola je jen jednoduchý kruhový buffer od začátku
+	*start_ptr = (uint8_t*)LOGGER_START_ADDR;
+	*len = (current_flash_ptr - LOGGER_START_ADDR);
+	APP_DBG("LOGGER: Pripraveno ke stazeni %lu bajtu", *len);
+}
+
