@@ -321,65 +321,65 @@ static void Config_FactoryReset(void)
 // =============================================================================
 void Config_Init(void)
 {
-    // 1. ZÁCHRANNÁ BRZDA: Kontrola tlačítka SW3 při startu desky
-    // Tlačítko je Active-Low (Při stisku vrací 0, v klidu 1)
-    if (BSP_PB_GetState(BUTTON_SW3) == 0)
-    {
-        // Krátká prodleva pro odfiltrování zákmitů
-        HAL_Delay(50);
+	// 1. ZÁCHRANNÁ BRZDA: Kontrola tlačítka SW3 při startu desky
+	// Tlačítko je Active-Low (Při stisku vrací 0, v klidu 1)
+	if (BSP_PB_GetState(BUTTON_SW3) == 0)
+	{
+		// Krátká prodleva pro odfiltrování zákmitů
+		HAL_Delay(50);
 
-        // Pokud je i po 50 ms stále stisknuto, myslí to uživatel vážně
-        if (BSP_PB_GetState(BUTTON_SW3) == 0)
-        {
-            uint8_t hold_time = 0;
+		// Pokud je i po 50 ms stále stisknuto, myslí to uživatel vážně
+		if (BSP_PB_GetState(BUTTON_SW3) == 0)
+		{
+			uint8_t hold_time = 0;
 
-            // Cyklus běží POUZE dokud uživatel fyzicky drží tlačítko
-            while(BSP_PB_GetState(BUTTON_SW3) == 0) {
-                HAL_Delay(100);
-                hold_time++;
+			// Cyklus běží POUZE dokud uživatel fyzicky drží tlačítko
+			while(BSP_PB_GetState(BUTTON_SW3) == 0) {
+				HAL_Delay(100);
+				hold_time++;
 
-                // !!! KRITICKÉ: Nakrmíme psa, aby nás během držení nesežral !!!
-                HAL_IWDG_Refresh(&hiwdg);
+				// !!! KRITICKÉ: Nakrmíme psa, aby nás během držení nesežral !!!
+				HAL_IWDG_Refresh(&hiwdg);
 
-                if(hold_time > 30) { // 30 * 100ms = 3 vteřiny
-                    APP_DBG(">>> SECURITY: DETEKOVAN ZACHRANNY RESET TLACITKEM! <<<");
-                    Config_FactoryReset(); // Smaže konfiguraci a vrátí PIN na 123456
+				if(hold_time > 30) { // 30 * 100ms = 3 vteřiny
+					APP_DBG(">>> SECURITY: DETEKOVAN ZACHRANNY RESET TLACITKEM! <<<");
+					Config_FactoryReset(); // Smaže konfiguraci a vrátí PIN na 123456
 
-                    // Zablikáme pro potvrzení úspěchu
-                    for(int i=0; i<10; i++) { BSP_LED_Toggle(LED_RED); HAL_Delay(50); }
-                    BSP_LED_Off(LED_RED);
-                    break; // Vyskočíme z cyklu
-                }
-            }
-        }
-    }
+					// Zablikáme pro potvrzení úspěchu
+					for(int i=0; i<10; i++) { BSP_LED_Toggle(LED_RED); HAL_Delay(50); }
+					BSP_LED_Off(LED_RED);
+					break; // Vyskočíme z cyklu
+				}
+			}
+		}
+	}
 
-    // =========================================================================
-    // 2. KONTROLA INTEGRITY PAMĚTI (Magic Word + CRC-32)
-    // =========================================================================
+	// =========================================================================
+	// 2. KONTROLA INTEGRITY PAMĚTI (Magic Word + CRC-32)
+	// =========================================================================
 
-    // Zkopírujeme si obsah Flash do RAM, abychom s ním mohli pracovat
-    RunnerConfig_t temp_cfg;
-    memcpy(&temp_cfg, (void*)DEVICE_CONFIG, sizeof(RunnerConfig_t));
+	// Zkopírujeme si obsah Flash do RAM, abychom s ním mohli pracovat
+	RunnerConfig_t temp_cfg;
+	memcpy(&temp_cfg, (void*)DEVICE_CONFIG, sizeof(RunnerConfig_t));
 
-    // Uložíme si přečtené CRC a pole pro výpočet vynulujeme
-    uint32_t saved_crc = temp_cfg.control_sum;
-    temp_cfg.control_sum = 0;
+	// Uložíme si přečtené CRC a pole pro výpočet vynulujeme
+	uint32_t saved_crc = temp_cfg.control_sum;
+	temp_cfg.control_sum = 0;
 
-    // Spočítáme kontrolní součet z dat
-    uint32_t calculated_crc = Calculate_CRC32((uint8_t*)&temp_cfg, sizeof(RunnerConfig_t));
+	// Spočítáme kontrolní součet z dat
+	uint32_t calculated_crc = Calculate_CRC32((uint8_t*)&temp_cfg, sizeof(RunnerConfig_t));
 
-    // Pokud nesedí magické slovo NEBO nesedí CRC, paměť je zničená/prázdná
-    if (DEVICE_CONFIG->magic_word != 0xCAFECAFE || saved_crc != calculated_crc)
-    {
-        APP_DBG("CONFIG: Pamet neznama nebo poskozena! (CRC: Ocekavano %08X, Precteno %08X)", calculated_crc, saved_crc);
-        Config_FactoryReset();
-    }
-    else
-    {
-        APP_DBG("CONFIG: Nacteno OK. Zavodnik: %s (ID: %lu)",
-                         DEVICE_CONFIG->comp_name, DEVICE_CONFIG->comp_device_id);
-    }
+	// Pokud nesedí magické slovo NEBO nesedí CRC, paměť je zničená/prázdná
+	if (DEVICE_CONFIG->magic_word != 0xCAFECAFE || saved_crc != calculated_crc)
+	{
+			APP_DBG("CONFIG: Pamet neznama nebo poskozena! (CRC: Ocekavano %08X, Precteno %08X)", calculated_crc, saved_crc);
+			Config_FactoryReset();
+	}
+	else
+	{
+			APP_DBG("CONFIG: Nacteno OK. Zavodnik: %s (ID: %lu)",
+											 DEVICE_CONFIG->comp_name, DEVICE_CONFIG->comp_device_id);
+	}
 }
 
 // -----------------------------------------------------------------------------
