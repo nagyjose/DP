@@ -198,7 +198,7 @@ static int8_t Get_MCU_Temperature(void)
 {
 	ADC_HandleTypeDef hadc1 = {0};
 	ADC_ChannelConfTypeDef sConfig = {0};
-	int8_t temp = 20; // Výchozí hodnota při selhání
+	int8_t temp = -128; // Výchozí hodnota při selhání
 
 	// Povolení hodin pro ADC
 	__HAL_RCC_ADC_CLK_ENABLE();
@@ -226,13 +226,18 @@ static int8_t Get_MCU_Temperature(void)
 		// Nastavení kanálu pro vnitřní teplotní senzor
 		sConfig.Channel = ADC_CHANNEL_TEMPSENSOR;
 		sConfig.Rank = ADC_REGULAR_RANK_1;
-		sConfig.SamplingTime = ADC_SAMPLETIME_47CYCLES_5; // Dostatečný čas pro probuzení senzoru
+		// 1. OPRAVA: Extrémně zpomalíme vzorkování (maximální možný čas pro nabití!)
+		sConfig.SamplingTime = ADC_SAMPLETIME_640CYCLES_5;
 		sConfig.SingleDiff = ADC_SINGLE_ENDED;
 		sConfig.OffsetNumber = ADC_OFFSET_NONE;
 		sConfig.Offset = 0;
 
 		if (HAL_ADC_ConfigChannel(&hadc1, &sConfig) == HAL_OK)
 		{
+			// 2. OPRAVA: Dáme senzoru čas na fyzické probuzení a ustálení napětí
+			// Datasheet vyžaduje ~15 µs, funkce HAL_Delay(1) počká minimálně 1 ms, což je dokonale bezpečné.
+			HAL_Delay(1);
+
 			if (HAL_ADC_Start(&hadc1) == HAL_OK)
 			{
 				// Čekáme max 100 ms na změření
@@ -250,6 +255,11 @@ static int8_t Get_MCU_Temperature(void)
 
 	// Vypneme hodiny pro úsporu baterie
 	__HAL_RCC_ADC_CLK_DISABLE();
+
+	// --- SOFTWAROVÁ KALIBRACE (Offset jádra) ---
+	if (temp != -128) { // Pokud měření neselhalo a nevrátilo výchozí dvacítku
+		temp = temp - 2;
+	}
 
 	return temp;
 }

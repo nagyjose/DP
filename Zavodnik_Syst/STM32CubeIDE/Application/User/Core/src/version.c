@@ -1,5 +1,5 @@
 // TENTO SOUBOR JE GENEROVAN AUTOMATICKY PRED KAZDOU KOMPILACI 
 // NEUPRAVOVAT! 
  
-const char fw_ver[] = "b0bc8cb-dirty (Z)"; 
-const char git_hash[] = "b0bc8cb-dirty"; 
+const char fw_ver[] = "0d2b67c-dirty (Z)"; 
+const char git_hash[] = "0d2b67c-dirty"; 
