@@ -61,6 +61,10 @@ void APP_FFD_MAC_802_15_4_Init( APP_MAC_802_15_4_InitMode_t InitMode, TL_CmdPack
 
 void APP_FFD_MAC_802_15_4_Stop()
 {
+	// ZASTAVÍME NAŠE ČASOVAČE, ABY NEŠKODILY BLUETOOTHU!
+	extern void Race_StateMachine_Stop(void);
+	Race_StateMachine_Stop();
+
   MAC_resetReq_t ResetReq;
   memset(&ResetReq,0x00,sizeof(MAC_resetReq_t));
   ResetReq.set_default_PIB = TRUE;
@@ -89,11 +93,11 @@ void APP_FFD_MAC_802_15_4_SetupTask(void)
 {
   MAC_resetReq_t    ResetReq;
   MAC_setReq_t      SetReq;
-  MAC_startReq_t    StartReq;
+  MAC_startReq_t    StartReq; // PŘIDÁNO ZPĚT!
 
-  long long extAddr = 0xACDE480000000002; // ZÁVODNÍK MÁ JINOU MAC ADRESU
-  uint16_t shortAddr   = 0x2233;          // ZÁVODNÍK MÁ JINOU SHORT ADRESU
-  uint16_t panId       = 0x1AAA;          // PAN ID (Sit) musí být stejné!
+  long long extAddr = 0xACDE480000000002;
+  uint16_t shortAddr   = 0x2233;
+  uint16_t panId       = 0x1AAA;
   uint8_t channel      = DEMO_CHANNEL;
   uint8_t PIB_Value = 0x00;
 
@@ -116,45 +120,37 @@ void APP_FFD_MAC_802_15_4_SetupTask(void)
   MAC_MLMESetReq( &SetReq );
   UTIL_SEQ_WaitEvt( 1U << CFG_EVT_SET_CNF );
 
-  /* Závodník netvoří síť pro ostatní */
-  memset(&SetReq,0x00,sizeof(MAC_setReq_t));
-  SetReq.PIB_attribute = g_MAC_ASSOCIATION_PERMIT_c;
-  PIB_Value = g_FALSE;
-  SetReq.PIB_attribute_valuePtr = &PIB_Value;
-  MAC_MLMESetReq( &SetReq );
-  UTIL_SEQ_WaitEvt( 1U << CFG_EVT_SET_CNF );
-
-  /* Závodník NENÍ Koordinátor (PAN_coordinator = g_FALSE) */
+  // =========================================================================
+  // BEZ TOHOTO STARTU BY RÁDIO IGNOROVALO NAŠE 30ms PROBOUZENÍ
+  // =========================================================================
   memset(&StartReq,0x00,sizeof(MAC_startReq_t));
   memcpy(StartReq.a_PAN_id,(uint8_t*)&panId,0x02);
   StartReq.channel_number   = channel;
-  StartReq.beacon_order     = 0x0F;
+  StartReq.beacon_order     = 0x0F; // Nevysílat majáky
   StartReq.superframe_order = 0x0F;
-  StartReq.PAN_coordinator  = g_FALSE;
+  StartReq.PAN_coordinator  = g_TRUE; // Jen pasivně posloucháme
   StartReq.battery_life_extension = g_FALSE;
   MAC_MLMEStartReq( &StartReq);
   UTIL_SEQ_WaitEvt( 1U << CFG_EVT_DEVICE_STARTED_CNF );
 
-  /* ZAPNUTÍ MAC VRSTVY - ALE VE STAVU USPANÉ ANTÉNY! */
-	memset(&SetReq,0x00,sizeof(MAC_setReq_t));
-	SetReq.PIB_attribute = g_MAC_RX_ON_WHEN_IDLE_c;
+  // =========================================================================
+  // ZAPNUTÍ MAC VRSTVY - VE STAVU USPANÉ ANTÉNY (Volno pro BLE!)
+  // =========================================================================
+  memset(&SetReq,0x00,sizeof(MAC_setReq_t));
+  SetReq.PIB_attribute = g_MAC_RX_ON_WHEN_IDLE_c;
+  PIB_Value = g_FALSE; // !!! ZAČÍNÁME SPÁNKEM !!!
+  SetReq.PIB_attribute_valuePtr = &PIB_Value;
+  MAC_MLMESetReq( &SetReq );
+  UTIL_SEQ_WaitEvt( 1U << CFG_EVT_SET_CNF );
 
-	// TADY MUSÍ BÝT g_FALSE! Kdyby tu bylo g_TRUE, anténa se uzamkne a BLE nevysílá!
-	PIB_Value = g_FALSE;
+  APP_DBG("ZAVODNIK READY - MAC Inicializovan a USPAN!");
+  BSP_LED_On(LED_BLUE);
 
-	SetReq.PIB_attribute_valuePtr = &PIB_Value;
-	MAC_MLMESetReq( &SetReq );
-	UTIL_SEQ_WaitEvt( 1U << CFG_EVT_SET_CNF );
-
-	// Upravili jsme text, ať nás to na terminálu nemate :)
-	APP_DBG("ZAVODNIK READY - MAC Inicializovan a USPAN!");
-	BSP_LED_On(LED_BLUE);
-
-	// =========================================================================
-	// SPUŠTĚNÍ AUTOMATU AŽ ZDE! (Nyní je M0+ bezpečně připraven ho poslechnout)
-	// =========================================================================
-	extern void Race_StateMachine_Init(void);
-	Race_StateMachine_Init();
+  // =========================================================================
+  // SPUŠTĚNÍ AUTOMATU
+  // =========================================================================
+  extern void Race_StateMachine_Init(void);
+  Race_StateMachine_Init();
 }
 
 static void APP_FFD_MAC_802_15_4_Config()

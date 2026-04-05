@@ -38,6 +38,7 @@
 #include "tl.h"
 #include "dbg_trace.h"
 #include "stm_logging.h"
+#include "app_ffd_mac_802_15_4_process.h"
 
 #define HOST_SYS_EVTCODE                (0xFFU)
 #define HOST_SYS_SUBEVTCODE_BASE        (0x9200U)
@@ -424,12 +425,12 @@ static void APPE_SysEvtReadyProcessing()
   APP_CheckWirelessFirmwareInfo();
 
   // ===========================================================================
-	// START SKUTEČNÉHO CONCURRENT MÓDU (BLE i MAC běží současně na pozadí)
+	// START EXKLUZIVNÍHO MÓDU (Pouze MAC vrstva, BLE čeká na Cíl/Magnet)
 	// ===========================================================================
-	APP_DBG(">>> STARTUJI CONCURRENT MODE (BLE + 802.15.4) <<<");
+	APP_DBG(">>> BOOTUJI DO MAC SNIFFING MODU <<<");
 
-	APP_BLE_Init(); // Zapne BLE Tunel (a začne vysílat Advertising)
-	APP_FFD_MAC_802_15_4_Init(APP_MAC_802_15_4_FULL, &Mac_802_15_4_CmdBuffer); // Zapne MAC
+	// ZDE JSME SMAZALI VOLÁNÍ APP_BLE_Init(); !!!
+	APP_FFD_MAC_802_15_4_Init(APP_MAC_802_15_4_FULL, &Mac_802_15_4_CmdBuffer);
 
   UTIL_LPM_SetOffMode(1U << CFG_LPM_APP, UTIL_LPM_ENABLE);
 
@@ -571,17 +572,24 @@ void HAL_GPIO_EXTI_Callback( uint16_t GPIO_Pin )
   switch (GPIO_Pin)
   {
   case BUTTON_SW1_PIN:
-    //APP_DBG("BUTTON 1 PUSHED ! : NO ACTION MAPPED ON SW1");
-    break;
+		//APP_DBG("BUTTON 1 PUSHED ! : NO ACTION MAPPED ON SW1");
+		break;
 
   case BUTTON_SW2_PIN:
-    //APP_DBG("BUTTON 2 PUSHED ! : SWITCHING PROTOCOL");
-    //UTIL_SEQ_SetTask(1U << CFG_TASK_INIT_SWITCH_PROTOCOL,CFG_SCH_PRIO_0);
-    break;
+		// BEZPEČNOSTNÍ POJISTKA: Během závodu ignorujeme magnety i tlačítka!
+		if (current_race_state == STATE_RACING) {
+			APP_DBG("SECURITY: Ignoruji magnet - probiha ZAVOD!");
+			return;
+		}
+
+		APP_DBG("MAGNET DETEKOVAN -> Prepinam protokol (BLE <-> MAC)");
+		// Pokud běželo BLE, vypne ho to a zapne MAC. A obráceně!
+		UTIL_SEQ_SetTask(1U << CFG_TASK_INIT_SWITCH_PROTOCOL, CFG_SCH_PRIO_0);
+		break;
 
   case BUTTON_SW3_PIN:
-     //APP_DBG("BUTTON 3 PUSHED ! : NO ACTION MAPPED ON SW3");
-     break;
+		//APP_DBG("BUTTON 3 PUSHED ! : NO ACTION MAPPED ON SW3");
+		break;
 
   default:
     break;

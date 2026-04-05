@@ -120,13 +120,7 @@ void System_Signalize_Start(uint8_t seconds)
 // =============================================================================
 // STAVOVÝ AUTOMAT ZÁVODNÍKA (WAKE-ON-RADIO / SNIFFING)
 // =============================================================================
-typedef enum {
-	STATE_IDLE,      // Režim "Sklad" - Děláme 30ms Sniffing každou vteřinu
-	STATE_RACING,    // Režim "Závod" - Trvalý příjem zapnut
-	STATE_FINISHED   // Režim "Cíl" - Závod ukončen, MAC rádio vypnuto
-} RaceState_t;
-
-static RaceState_t current_race_state = STATE_IDLE;
+RaceState_t current_race_state = STATE_IDLE; // UŽ BEZ "static"!
 uint8_t SniffTimerId;
 uint8_t SleepTimerId;
 
@@ -181,6 +175,15 @@ void Race_StateMachine_Init(void)
 
 	// První kopnutí, které roztočí nekonečný cyklus
 	UTIL_SEQ_SetTask(1 << CFG_TASK_MAC_SNIFF, CFG_SCH_PRIO_0);
+}
+
+// Vypnutí časovačů při přechodu na BLE
+void Race_StateMachine_Stop(void)
+{
+	HW_TS_Stop(SniffTimerId);
+	HW_TS_Stop(SleepTimerId);
+	current_race_state = STATE_FINISHED;
+	APP_DBG(">>> RACE STATE: ZASTAVEN (Casovace vypnuty) <<<");
 }
 
 // =============================================================================
@@ -440,7 +443,7 @@ void APP_MAC_ReceiveData(void)
 							current_race_state = STATE_FINISHED;
 							MAC_Set_RX_State(false);
 							APP_DBG(">>> RACE STATE: FINISHED (MAC vypnuto, ceka na mobil) <<<");
-							//UTIL_SEQ_SetTask(1U << CFG_TASK_INIT_SWITCH_PROTOCOL, CFG_SCH_PRIO_0);
+							UTIL_SEQ_SetTask(1U << CFG_TASK_INIT_SWITCH_PROTOCOL, CFG_SCH_PRIO_0);
 						}
 					}
 				}

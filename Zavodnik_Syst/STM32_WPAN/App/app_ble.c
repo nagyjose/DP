@@ -176,8 +176,9 @@ typedef struct
 
 /* Private defines -----------------------------------------------------------*/
 #define APPBLE_GAP_DEVICE_NAME_LENGTH 7
-#define FAST_ADV_TIMEOUT               (30*1000*1000/CFG_TS_TICK_VAL) /**< 30s */
-#define INITIAL_ADV_TIMEOUT            (60*1000*1000/CFG_TS_TICK_VAL) /**< 60s */
+// 15 minut = 900 vteřin * 1000 * 1000 / CFG_TS_TICK_VAL
+#define FAST_ADV_TIMEOUT               (900*1000*1000/CFG_TS_TICK_VAL)
+#define INITIAL_ADV_TIMEOUT            (900*1000*1000/CFG_TS_TICK_VAL)
 
 #define BD_ADDR_SIZE_LOCAL    6
 
@@ -1025,13 +1026,10 @@ static void Adv_Cancel( void )
 
 static void Adv_Cancel_Req( void )
 {
-/* USER CODE BEGIN Adv_Cancel_Req_1 */
+  APP_DBG(">>> BLE TIMEOUT (15 min): Vypinam BLE a vracim se k MAC Sniffingu <<<");
 
-/* USER CODE END Adv_Cancel_Req_1 */
-  UTIL_SEQ_SetTask(1 << CFG_TASK_ADV_CANCEL_ID, CFG_SCH_PRIO_0);
-/* USER CODE BEGIN Adv_Cancel_Req_2 */
-
-/* USER CODE END Adv_Cancel_Req_2 */
+  // Zastavíme Bluetooth a probudíme 802.15.4 MAC
+  UTIL_SEQ_SetTask(1U << CFG_TASK_INIT_SWITCH_PROTOCOL, CFG_SCH_PRIO_0);
   return;
 }
 

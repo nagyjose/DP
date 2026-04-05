@@ -29,6 +29,14 @@ extern "C" {
 
 #include "802_15_4_mac_types.h"
 
+typedef enum {
+    STATE_IDLE,      // Režim "Sklad"
+    STATE_RACING,    // Režim "Závod"
+    STATE_FINISHED   // Režim "Cíl"
+} RaceState_t;
+
+extern RaceState_t current_race_state;
+
 MAC_Status_t APP_MAC_mlmeAssociateCnfCb( const  MAC_associateCnf_t * pAssociateCnf );
 MAC_Status_t APP_MAC_mlmeAssociateIndCb( const  MAC_associateInd_t * pAssociateInd );
 MAC_Status_t APP_MAC_mlmeBeaconNotifyIndCb( const  MAC_beaconNotifyInd_t * pBeaconNotifyInd );
