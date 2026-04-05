@@ -66,6 +66,7 @@ extern void APP_FFD_MAC_802_15_4_CoordSrvTask(void);
 extern void APP_FFD_MAC_802_15_4_CoordDataTask(void);
 
 extern void TestMode_CycleState(void);
+extern void APP_MAC_Magnet_Action(void);
 
 extern uint8_t g_srvSerReq;
 extern uint8_t g_srvDataReq;
@@ -577,8 +578,9 @@ void HAL_GPIO_EXTI_Callback( uint16_t GPIO_Pin )
     break;
 
   case BUTTON_SW2_PIN:
-    APP_DBG("BUTTON 2 PUSHED ! : SWITCHING PROTOCOL");
-    UTIL_SEQ_SetTask(1U << CFG_TASK_INIT_SWITCH_PROTOCOL,CFG_SCH_PRIO_0);
+  	// PŘESMĚROVÁNO DO NAŠEHO MAC PROCESU
+		APP_MAC_Magnet_Action();
+		APP_DBG("BUTTON 2 PUSHED ! : STATE CHANGE");
     break;
 
   case BUTTON_SW3_PIN:

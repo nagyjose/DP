@@ -377,38 +377,34 @@ MAC_Status_t APP_MAC_mlmeBeaconNotifyIndCb(const MAC_beaconNotifyInd_t * pBeacon
 // ... (Zde muzes klidne nechat smazane nebo jako NOT_IMPLEMENTED vsechny ostatni callbacky z puvodniho souboru)
 
 // =============================================================================
-// OBSLUHA HARDWAROVÝCH PŘERUŠENÍ (MAGNET / TLAČÍTKO)
+// OBSLUHA MAGNETU (TLAČÍTKO SW2)
 // =============================================================================
-void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
+void APP_MAC_Magnet_Action(void)
 {
-	// Detekce tlačítka SW2 (Na Nucleo desce simuluje přiložení magnetu)
-	if (GPIO_Pin == BUTTON_SW2_PIN)
-	{
-		// Zamezení zákmitům (Jednoduchý softwarový debouncing)
-		static uint32_t last_trigger_time = 0;
-		if (HAL_GetTick() - last_trigger_time < 500) return; // Ignoruj další stisk po dobu 500 ms
-		last_trigger_time = HAL_GetTick();
+	// Zamezení zákmitům (Jednoduchý softwarový debouncing)
+	static uint32_t last_trigger_time = 0;
+	if (HAL_GetTick() - last_trigger_time < 500) return; // Ignoruj další stisk po dobu 500 ms
+	last_trigger_time = HAL_GetTick();
 
-		// LOGIKA MAGNETU
-		if (current_state == STATE_IDLE_MAC) {
-			current_state = STATE_ACTIVE_MAC;
-			APP_DBG(">>> MAGNET: Kontrola probuzena do ZAVODNIHO rezimu! <<<");
+	// LOGIKA MAGNETU
+	if (current_state == STATE_IDLE_MAC) {
+		current_state = STATE_ACTIVE_MAC;
+		APP_DBG(">>> MAGNET: Kontrola probuzena do ZAVODNIHO rezimu! <<<");
 
-			// Zablikáme a zapípáme pro vizuální potvrzení roznášeči (např. 2 sekundy)
-			blink_counter = 8; // 8 tiků po 250 ms = 2 sekundy
-			is_signal_active = false;
-			UTIL_SEQ_SetTask(1 << CFG_TASK_BUZZER, CFG_SCH_PRIO_0);
-		}
-		else if (current_state == STATE_ACTIVE_MAC) {
-			// Volitelné: Můžeme nechat magnet i pro případné manuální uspání zpět do IDLE
-			current_state = STATE_IDLE_MAC;
-			APP_DBG(">>> MAGNET: Kontrola uspana do VIKENDOVEHO rezimu! <<<");
+		// Zablikáme a zapípáme pro vizuální potvrzení roznášeči (např. 2 sekundy)
+		blink_counter = 8; // 8 tiků po 250 ms = 2 sekundy
+		is_signal_active = false;
+		UTIL_SEQ_SetTask(1 << CFG_TASK_BUZZER, CFG_SCH_PRIO_0);
+	}
+	else if (current_state == STATE_ACTIVE_MAC) {
+		// Volitelné: Můžeme nechat magnet i pro případné manuální uspání zpět do IDLE
+		current_state = STATE_IDLE_MAC;
+		APP_DBG(">>> MAGNET: Kontrola uspana do VIKENDOVEHO rezimu! <<<");
 
-			// Pípneme jen krátce 1x na znamení uspání
-			blink_counter = 2;
-			is_signal_active = false;
-			UTIL_SEQ_SetTask(1 << CFG_TASK_BUZZER, CFG_SCH_PRIO_0);
-		}
+		// Pípneme jen krátce 1x na znamení uspání
+		blink_counter = 2;
+		is_signal_active = false;
+		UTIL_SEQ_SetTask(1 << CFG_TASK_BUZZER, CFG_SCH_PRIO_0);
 	}
 }
 
