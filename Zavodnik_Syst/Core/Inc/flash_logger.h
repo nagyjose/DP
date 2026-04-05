@@ -3,6 +3,7 @@
 
 #include "stm32wbxx_hal.h"
 #include "app_conf.h"
+#include <stdbool.h>
 
 // --- KONFIGURACE PAMĚTI ---
 // Stránka 32 (0x08020000) je vyhrazená pro statická data uživatele (index 0)
@@ -42,6 +43,7 @@ void Logger_FormatAll(void);
 void Config_Commit(RunnerConfig_t *new_cfg);
 void Config_EraseAndReboot(void);
 void System_FactoryResetAll(void);
+bool Logger_IsRaceClosed(void);
 
 
 #endif /* FLASH_LOGGER_H */

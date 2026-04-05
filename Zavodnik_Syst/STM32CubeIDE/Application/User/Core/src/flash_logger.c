@@ -12,6 +12,7 @@ extern IWDG_HandleTypeDef hiwdg; // Potřebujeme sáhnout na psa v main.c
 // Globální proměnné pro rychlý zápis z RAM
 static uint32_t current_flash_ptr = LOGGER_START_ADDR;
 static uint16_t current_punch_index = 0;
+bool is_race_closed = false; // <--- PŘIDÁNO: Zámek aktuálního závodu
 
 // =============================================================================
 // VÝPOČET CRC-32 (Standardní IEEE 802.3 polynom)
@@ -89,6 +90,14 @@ void Logger_Init(void)
 
 	while (*(volatile uint64_t*)current_flash_ptr != 0xFFFFFFFFFFFFFFFF)
 	{
+		// --- PŘIDÁNO: Kontrola, zda tento záznam není CÍL ---
+		uint8_t *raw = (uint8_t*)current_flash_ptr;
+		uint16_t cid = (raw[0] << 4) | (raw[1] >> 4);
+		if (cid == FINISH_CONTROL_ID) {
+			is_race_closed = true;
+		}
+		// ----------------------------------------------------
+
 		current_punch_index++;
 		current_flash_ptr += 8;
 
@@ -133,6 +142,11 @@ void Logger_SavePunch(uint8_t* raw_payload, uint8_t rssi_abs, int8_t temperature
 	record.data.rssi = rssi_abs;
 	record.data.temperature = temperature; // Nová teplota!
 
+	// --- PŘIDÁNO: Uzamčení závodu po oražení Cíle ---
+	if (control_id == FINISH_CONTROL_ID) {
+		is_race_closed = true;
+	}
+
 	HAL_FLASH_Unlock();
 	__HAL_FLASH_CLEAR_FLAG(FLASH_FLAG_OPTVERR | FLASH_FLAG_EOP | FLASH_FLAG_WRPERR | FLASH_FLAG_PGSERR);
 	HAL_FLASH_Program(FLASH_TYPEPROGRAM_DOUBLEWORD, current_flash_ptr, record.double_word);
@@ -154,6 +168,8 @@ void Logger_SavePunch(uint8_t* raw_payload, uint8_t rssi_abs, int8_t temperature
 // 3. CLEAR KONTROLA (Nulování a přesun na další stránku)
 void Logger_NewRace(uint8_t* raw_clear_payload)
 {
+	is_race_closed = false; // <--- PŘIDÁNO: Odemknutí nového závodu
+
 	//uint32_t current_page_offset = current_flash_ptr - LOGGER_START_ADDR;
 	//uint32_t current_page_index = current_page_offset / LOGGER_PAGE_SIZE;
 	//uint32_t current_page_addr = LOGGER_START_ADDR + (current_page_index * LOGGER_PAGE_SIZE);
@@ -569,3 +585,8 @@ void System_FactoryResetAll(void)
     EraseConfigPage();  // Smaže nultou konfigurační stránku
     NVIC_SystemReset(); // Tvrdý hardwarový restart
 }
+
+bool Logger_IsRaceClosed(void) {
+	return is_race_closed;
+}
+

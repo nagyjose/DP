@@ -338,6 +338,20 @@ void APP_MAC_ReceiveData(void)
 		uint16_t control_id = (payload[0] << 4) | (payload[1] >> 4);
 
 		// =====================================================================
+		// FIREWALL: OCHRANA UZAVŘENÉHO ZÁVODU
+		// =====================================================================
+		extern bool Logger_IsRaceClosed(void);
+		if (Logger_IsRaceClosed()) {
+			// Po Cíli hrajeme mrtvého brouka.
+			// Zareagujeme UŽ JEN na CLEAR (Otevření nového závodu a okruhu).
+			// Do BLE se přepínáme výhradně magnetem!
+			if (control_id != CLEAR_CONTROL_ID) {
+				FrameOnGoing = FALSE;
+				return; // Okamžitě zahodíme (bez pípnutí, bez logu)
+			}
+		}
+
+		// =====================================================================
 		// 1. ZÍSKÁNÍ PARAMETRŮ Z KONFIGURAČNÍ PAMĚTI
 		// =====================================================================
 		uint8_t window_size = DEVICE_CONFIG->num_hits;
