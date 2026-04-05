@@ -62,6 +62,7 @@ typedef enum {
     CMD_IDENTIFY            = 0x40,
 		CMD_SYNC_TIME						= 0x30,
 		CMD_SLEEP               = 0x51,  // PŘIDÁNO: Příkaz pro návrat do MAC
+		CMD_POWER_OFF           = 0x52,  // PŘIDÁNO: Tvrdé vypnutí do STORAGE
 
     // --- Mazání a Resety ---
     CMD_RESET_CONFIG        = 0x97,
@@ -236,6 +237,35 @@ void BLE_Chunker_Task(void)
 	{
 		APP_DBG(">>> BLE CHUNKER: Kriticka chyba odeslani! (Err: 0x%02X)", ret);
 	}
+}
+
+// =============================================================================
+// HARDWAROVÉ VYPNUTÍ DO STORAGE MÓDU
+// =============================================================================
+static void System_Enter_Storage_Mode(void)
+{
+	APP_DBG(">>> SYSTEM: Prechod do hlubokeho spanku (STORAGE) <<<");
+
+	// 1. Zastavíme všechny procesy a rádio
+	// (V tuto chvíli běží BLE, takže ho korektně vypneme)
+	extern void APP_BLE_Stop(void);
+	APP_BLE_Stop();
+
+	// 2. Vyčistíme všechny staré Wake-Up vlajky
+	__HAL_PWR_CLEAR_FLAG(PWR_FLAG_WU);
+
+	// 3. POVOLENÍ WAKE-UP PINU PRO MAGNET
+	// STM32WB55 má 5 možných WKUP pinů (PA0, PC13, PC12, PA2, PC5).
+	// ZDE SI MUSÍŠ ZVOLIT TEN, NA KTERÉM JE TVÁ HALLOVA SONDA!
+	// (Příklad pro PA0 = WKUP1, reaguje na vzestupnou hranu / HIGH):
+	HAL_PWR_EnableWakeUpPin(PWR_WAKEUP_PIN1_HIGH);
+
+	// Pokud sonda vrací v klidu HIGH a při přiložení magnetu spadne na LOW,
+	// použij parametr PWR_WAKEUP_PIN1_LOW (dostupné dle revize HAL knihoven).
+
+	// 4. Skok do Standby módu (Deska se vypne, RAM se smaže)
+	// Probudí se jedině magnetem, čímž proběhne klasický reset a start od main()
+	HAL_PWR_EnterSTANDBYMode();
 }
 
 // -----------------------------------------------------------------------------
@@ -459,6 +489,25 @@ static SVCCTL_EvtAckStatus_t Tunnel_Event_Handler(void *pckt)
 								// Pojistka: Kdybychom handle neměli, přepneme rovnou
 								UTIL_SEQ_SetTask(1U << CFG_TASK_INIT_SWITCH_PROTOCOL, CFG_SCH_PRIO_0);
 							}
+							break;
+
+						case CMD_POWER_OFF: // CMD_POWER_OFF (0x52)
+							if (!is_unlocked) {
+								uint8_t err_lock[4] = {cmd, 0xAA, 0x00, 0x00}; BLE_Tunnel_Send(err_lock, 4);
+								break;
+							}
+
+							APP_DBG(">>> BLE CMD: POWER OFF (0x52) - Vypinam kontrolu...");
+
+							// Odpovíme mobilu, že povel přijímáme
+							uint8_t ack_off[4] = {0x52, 0x01, 0x00, 0x00};
+							BLE_Tunnel_Send(ack_off, 4);
+
+							// Necháme balíček 100 ms odletět vzduchem k mobilu
+							HAL_Delay(100);
+
+							// Usmrtíme procesor do STORAGE módu
+							System_Enter_Storage_Mode();
 							break;
 
 						// =====================================================
