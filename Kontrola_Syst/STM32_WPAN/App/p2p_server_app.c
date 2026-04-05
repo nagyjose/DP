@@ -18,6 +18,8 @@
 #include <stdbool.h>
 #include "app_ffd_mac_802_15_4_process.h"
 
+extern void System_Signalize_Start(uint8_t seconds);
+
 // --- NAŠE UNIKÁTNÍ UUID (128-bit) ---
 #define COPY_SERVICE_UUID(uuid_struct) { \
   (uuid_struct)[0]=0x19; (uuid_struct)[1]=0xed; (uuid_struct)[2]=0x82; (uuid_struct)[3]=0xae; \
@@ -98,6 +100,44 @@ typedef enum {
     PARAM_TEAM_ORISID       = 0x16,
     PARAM_TEAM_OTHER_INFO   = 0x17
 } Config_Param_t;
+
+// Zpřístupnění hlavního RTC ovladače z main.c
+extern RTC_HandleTypeDef hrtc;
+
+// -----------------------------------------------------------------------------
+// PŘEVODNÍK: UNIX TIMESTAMP -> STM32 RTC KALENDÁŘ
+// -----------------------------------------------------------------------------
+static void Convert_UnixToRTC(uint32_t unix_time, RTC_TimeTypeDef *time, RTC_DateTypeDef *date)
+{
+    // Výpočet času v rámci dne
+    uint32_t days = unix_time / 86400;
+    uint32_t seconds_in_day = unix_time % 86400;
+
+    time->Seconds = seconds_in_day % 60;
+    time->Minutes = (seconds_in_day / 60) % 60;
+    time->Hours = seconds_in_day / 3600;
+
+    // Matematická magie pro převod dnů na kalendář (Shift z roku 1970)
+    uint32_t z = days + 719468;
+    uint32_t era = (z >= 0 ? z : z - 146096) / 146097;
+    uint32_t doe = (z - era * 146097);
+    uint32_t yoe = (doe - doe/1460 + doe/36524 - doe/146096) / 365;
+    uint32_t y = yoe + era * 400;
+    uint32_t doy = doe - (365*yoe + yoe/4 - yoe/100);
+    uint32_t mp = (5*doy + 2)/153;
+    uint32_t d = doy - (153*mp+2)/5 + 1;
+    uint32_t m = mp + (mp < 10 ? 3 : -9);
+    uint32_t year = y + (m <= 2);
+
+    // Uložení do STM32 struktur
+    date->Date = d;
+    date->Month = m;
+    date->Year = year - 2000; // STM32 používá jen roky 0-99 (vztaženo k roku 2000)
+
+    // Výpočet dne v týdnu (1.1.1970 byl čtvrtek = 4)
+    date->WeekDay = (days + 4) % 7;
+    if (date->WeekDay == 0) date->WeekDay = 7; // STM32 počítá týden 1-7 (Pondělí - Neděle)
+}
 
 // =============================================================================
 // STAVOVÉ PROMĚNNÉ PRO KRÁJEČ (CHUNKER)
@@ -557,15 +597,4 @@ void P2PS_APP_Notification(P2PS_APP_ConnHandle_Not_evt_t *pNotification)
 	}
 }
 
-// -----------------------------------------------------------------------------
-// CHYBĚJÍCÍ FUNKCE (Signalizace a ST Middleware)
-// -----------------------------------------------------------------------------
-
-// Funkce pro CMD_IDENTIFY (Zatím jen rozsvítíme modrou LED)
-void System_Signalize_Start(uint8_t seconds)
-{
-	APP_DBG(">>> SIGNALIZACE: %d sekund", seconds);
-	BSP_LED_On(LED_BLUE);
-	// (Případně sem později napojíme časovač na blikání)
-}
 
