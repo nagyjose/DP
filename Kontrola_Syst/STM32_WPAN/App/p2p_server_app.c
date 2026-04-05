@@ -19,6 +19,7 @@
 #include "app_ffd_mac_802_15_4_process.h"
 
 extern void System_Signalize_Start(uint8_t seconds);
+extern uint16_t Get_Battery_Voltage(void);
 
 // --- NAŠE UNIKÁTNÍ UUID (128-bit) ---
 #define COPY_SERVICE_UUID(uuid_struct) { \
@@ -47,9 +48,11 @@ typedef enum {
 
     // --- Čtení dat ---
     CMD_READ_CONFIG         = 0x10,
-    CMD_DOWNLOAD_CURRENT    = 0x20,
-    CMD_DOWNLOAD_ALL        = 0x21,
-    CMD_DOWNLOAD_SPECIFIC   = 0x22,
+		CMD_GET_STATUS          = 0x11, // Rychlý status (Bez logů)
+		CMD_GET_BATTERY         = 0x14, // <--- PŘIDÁNO: Samostatný stav baterie
+		CMD_DOWNLOAD_ALL        = 0x21, // Vše (od nejstaršího po nejnovější)
+		CMD_DOWNLOAD_FROM_TIME  = 0x23, // PŘIDÁNO: Od zadaného UNIX času
+		CMD_DOWNLOAD_LAST_N     = 0x24, // PŘIDÁNO: Posledních N záznamů
 
     // --- Zápis do Konfigurace (Staging) ---
     CMD_STAGE_PARAM         = 0x12,
@@ -57,6 +60,7 @@ typedef enum {
 
     // --- Nástroje ---
     CMD_IDENTIFY            = 0x40,
+		CMD_SYNC_TIME						= 0x30,
 		CMD_SLEEP               = 0x51,  // PŘIDÁNO: Příkaz pro návrat do MAC
 
     // --- Mazání a Resety ---
@@ -139,6 +143,25 @@ static void Convert_UnixToRTC(uint32_t unix_time, RTC_TimeTypeDef *time, RTC_Dat
     if (date->WeekDay == 0) date->WeekDay = 7; // STM32 počítá týden 1-7 (Pondělí - Neděle)
 }
 
+// -----------------------------------------------------------------------------
+// PŘEVODNÍK: STM32 RTC KALENDÁŘ -> UNIX TIMESTAMP
+// -----------------------------------------------------------------------------
+static uint32_t Convert_RTCToUnix(RTC_DateTypeDef *date, RTC_TimeTypeDef *time)
+{
+    uint16_t y = date->Year + 2000;
+    uint8_t m = date->Month;
+
+    if (m <= 2) {
+        y -= 1;
+        m += 12;
+    }
+
+    // Klasický výpočet dnů od 1. 1. 1970
+    uint32_t days = (365 * (uint32_t)y) + (y / 4) - (y / 100) + (y / 400) + ((367 * (uint32_t)m - 362) / 12) + date->Date - 1 - 719468;
+
+    return (days * 86400) + (time->Hours * 3600) + (time->Minutes * 60) + time->Seconds;
+}
+
 // =============================================================================
 // STAVOVÉ PROMĚNNÉ PRO KRÁJEČ (CHUNKER)
 // =============================================================================
@@ -177,25 +200,28 @@ void BLE_Chunker_Task(void)
 {
 	if (chunk_rem_len == 0) return; // Není co posílat
 
-	// Zjistíme, jestli pošleme plných 200 bajtů, nebo už jen zbytek
 	uint16_t send_len = (chunk_rem_len > CHUNK_MAX_SIZE) ? CHUNK_MAX_SIZE : chunk_rem_len;
+
+	// OCHRANA PROTI PŘETEČENÍ: Nesmíme číst za hranicí naší vyhrazené Flash paměti!
+	uint32_t flash_end = LOGGER_START_ADDR + (LOGGER_MAX_PAGES * LOGGER_PAGE_SIZE);
+	if ((uint32_t)chunk_ptr + send_len > flash_end) {
+		send_len = flash_end - (uint32_t)chunk_ptr; // Zkrátíme paket přesně po hranu
+	}
 
 	// Fyzický pokus o odeslání do fronty Bluetooth rádia
 	tBleStatus ret = aci_gatt_update_char_value(OrienteeringServiceHdle, TxCharHdle, 0, send_len, chunk_ptr);
 
 	if (ret == BLE_STATUS_SUCCESS)
 	{
-		// Paket vložen do vysílače! Posuneme ukazatele dopředu.
 		chunk_ptr += send_len;
 		chunk_rem_len -= send_len;
 
-		// PŘIDÁNO: Nativní podpora pro Kruhový Buffer (Přetečení)
-		if ((uint32_t)chunk_ptr >= (LOGGER_START_ADDR + (LOGGER_MAX_PAGES * LOGGER_PAGE_SIZE))) {
+		// Pokud jsme dojeli ukazatelem přesně na konec paměti, přetočíme ho na začátek
+		if ((uint32_t)chunk_ptr >= flash_end) {
 			chunk_ptr = (uint8_t*)LOGGER_START_ADDR;
 		}
 
 		if (chunk_rem_len > 0) {
-			// Pořád máme data, takže se pokusíme rovnou vypálit další dávku
 			UTIL_SEQ_SetTask(1 << CFG_TASK_BLE_CHUNKER, CFG_SCH_PRIO_0);
 		} else {
 			APP_DBG(">>> BLE CHUNKER: Prenos dokoncen! (CMD: 0x%02X)", chunk_active_cmd);
@@ -262,35 +288,102 @@ static SVCCTL_EvtAckStatus_t Tunnel_Event_Handler(void *pckt)
 							UTIL_SEQ_SetTask(1 << CFG_TASK_BLE_CHUNKER, CFG_SCH_PRIO_0);
 							break;
 
-						case CMD_DOWNLOAD_CURRENT: // CMD_DOWNLOAD_CURRENT (Poslední stránka)
-						case CMD_DOWNLOAD_ALL: // CMD_DOWNLOAD_ALL (Celá historie)
-						case CMD_DOWNLOAD_SPECIFIC: // CMD_DOWNLOAD_SPECIFIC (S parametrem)
-						{
-							// Přečteme případný druhý bajt (parametr), pokud ho mobil poslal
-							uint8_t param = (mod->Attr_Data_Length >= 2) ? mod->Attr_Data[1] : 0;
+							// =====================================================
+							// RYCHLÝ STATUS KONTROLY (0x11)
+							// =====================================================
+							case CMD_GET_STATUS:
+								if (is_unlocked) {
+									uint8_t status_payload[12]; // Zvětšeno na 12 bajtů
+									uint16_t bat_mv = Get_Battery_Voltage();
 
-							uint8_t *data_ptr = NULL;
-							uint32_t data_len = 0;
+									// Vyčtení RTC hodin (POZOR: Musí se číst Time a hned po něm Date!)
+									RTC_TimeTypeDef sTime = {0};
+									RTC_DateTypeDef sDate = {0};
+									HAL_RTC_GetTime(&hrtc, &sTime, RTC_FORMAT_BIN);
+									HAL_RTC_GetDate(&hrtc, &sDate, RTC_FORMAT_BIN);
+									uint32_t unix_now = Convert_RTCToUnix(&sDate, &sTime);
 
-							// Zeptáme se Loggeru, kde data leží a kolik jich je
-							Logger_GetDownloadData(cmd, param, &data_ptr, &data_len);
+									status_payload[0] = 0x11; // Odpověď na příkaz
 
-							if (data_len > 0 && data_ptr != NULL) {
-								APP_DBG(">>> BLE CMD: Odesilam LOGY (0x%02X) - Delka: %lu bajtu", cmd, data_len);
+									// 1. ID Kontroly (16 bitů)
+									status_payload[1] = (DEVICE_CONFIG->stat_device_type >> 8) & 0xFF;
+									status_payload[2] = DEVICE_CONFIG->stat_device_type & 0xFF;
 
-								// Nabijeme Kráječ a spustíme střelbu!
-								chunk_ptr = data_ptr;
-								chunk_rem_len = data_len;
-								chunk_active_cmd = cmd;
-								UTIL_SEQ_SetTask(1 << CFG_TASK_BLE_CHUNKER, CFG_SCH_PRIO_0);
-							} else {
-								APP_DBG(">>> BLE CMD: Zadne logy k odeslani!");
-								// Odpovíme mobilu, že je paměť prázdná
-								uint8_t ack_empty[4] = {cmd, 0x00, 0x00, 0x00};
-								BLE_Tunnel_Send(ack_empty, 4);
+									// 2. Vysílací parametry (Perioda, Výkon, Bzučák)
+									status_payload[3] = DEVICE_CONFIG->beacon_period_ms;
+									status_payload[4] = DEVICE_CONFIG->tx_power;
+									status_payload[5] = DEVICE_CONFIG->buzzer_onoff;
+
+									// 3. Napětí baterie (16 bitů v milivoltech)
+									status_payload[6] = (bat_mv >> 8) & 0xFF;
+									status_payload[7] = bat_mv & 0xFF;
+
+									// 4. PŘIDÁNO: Aktuální UNIX čas v Kontrole (32 bitů)
+									status_payload[8] = (unix_now >> 24) & 0xFF;
+									status_payload[9] = (unix_now >> 16) & 0xFF;
+									status_payload[10] = (unix_now >> 8) & 0xFF;
+									status_payload[11] = unix_now & 0xFF;
+
+									APP_DBG(">>> BLE CMD: GET STATUS (0x11) - Baterie: %d mV, Cas: %lu", bat_mv, unix_now);
+									BLE_Tunnel_Send(status_payload, 12);
+								} else {
+									uint8_t err_lock[4] = {cmd, 0xAA, 0x00, 0x00}; BLE_Tunnel_Send(err_lock, 4);
+								}
+								break;
+
+							// =====================================================
+							// SAMOSTATNÉ MĚŘENÍ BATERIE (0x14)
+							// =====================================================
+							case CMD_GET_BATTERY:
+								if (is_unlocked) {
+									uint8_t bat_payload[3];
+									uint16_t bat_mv = Get_Battery_Voltage();
+
+									bat_payload[0] = 0x14; // Odpověď na příkaz
+									bat_payload[1] = (bat_mv >> 8) & 0xFF;
+									bat_payload[2] = bat_mv & 0xFF;
+
+									APP_DBG(">>> BLE CMD: GET BATTERY (0x14) - Napeti: %d mV", bat_mv);
+									BLE_Tunnel_Send(bat_payload, 3);
+								} else {
+									uint8_t err_lock[4] = {cmd, 0xAA, 0x00, 0x00}; BLE_Tunnel_Send(err_lock, 4);
+								}
+								break;
+
+							case CMD_DOWNLOAD_ALL:
+							case CMD_DOWNLOAD_FROM_TIME:
+							case CMD_DOWNLOAD_LAST_N:
+							{
+								uint32_t param = 0;
+
+								// Pokud mobil k příkazu přibalil 4 bajty dat (N, nebo UNIX čas)
+								if (mod->Attr_Data_Length >= 5) {
+									param = ((uint32_t)mod->Attr_Data[1] << 24) |
+													((uint32_t)mod->Attr_Data[2] << 16) |
+													((uint32_t)mod->Attr_Data[3] << 8)  |
+													 (uint32_t)mod->Attr_Data[4];
+								}
+
+								uint8_t *data_ptr = NULL;
+								uint32_t data_len = 0;
+
+								// Předáme požadavek paměťovému modulu (všimni si, že param je nyní uint32_t!)
+								extern void Logger_GetDownloadData(uint8_t cmd, uint32_t param, uint8_t **start_ptr, uint32_t *len);
+								Logger_GetDownloadData(cmd, param, &data_ptr, &data_len);
+
+								if (data_len > 0 && data_ptr != NULL) {
+									APP_DBG(">>> BLE CMD: Odesilam LOGY (0x%02X) - Delka: %lu bajtu", cmd, data_len);
+									chunk_ptr = data_ptr;
+									chunk_rem_len = data_len;
+									chunk_active_cmd = cmd;
+									UTIL_SEQ_SetTask(1 << CFG_TASK_BLE_CHUNKER, CFG_SCH_PRIO_0);
+								} else {
+									APP_DBG(">>> BLE CMD: Zadne logy k odeslani (nebo zadne nevyhovuji)!");
+									uint8_t ack_empty[4] = {cmd, 0x00, 0x00, 0x00};
+									BLE_Tunnel_Send(ack_empty, 4);
+								}
+								break;
 							}
-							break;
-						}
 
 						case CMD_IDENTIFY: // CMD_IDENTIFY (Najdi můj čip)
 							APP_DBG(">>> BLE CMD: IDENTIFY (0x40) - Zacinam signalizovat!");
@@ -301,6 +394,50 @@ static SVCCTL_EvtAckStatus_t Tunnel_Event_Handler(void *pckt)
 							// Odpovíme mobilu, že úkol běží
 							uint8_t ack_id[4] = {0x40, 0x01, 0x00, 0x00};
 							BLE_Tunnel_Send(ack_id, 4);
+							break;
+
+						case CMD_SYNC_TIME: // CMD_SYNC_TIME (Seřízení RTC hodin Kontroly)
+							if (is_unlocked) {
+								// OPRAVA: Musíme si z paketu správně vytáhnout délku a data
+								uint8_t payload_len = mod->Attr_Data_Length - 1; // Mínus 1 bajt za samotný příkaz
+								uint8_t *time_payload = &mod->Attr_Data[1];      // Data začínají na indexu 1
+
+								if (payload_len == 4) {
+									// 1. Složení 4 bajtů (MSB First) do uint32_t
+									uint32_t unix_timestamp = ((uint32_t)time_payload[0] << 24) |
+																((uint32_t)time_payload[1] << 16) |
+																((uint32_t)time_payload[2] << 8)  |
+																((uint32_t)time_payload[3]);
+
+									APP_DBG(">>> BLE CMD: SYNC TIME (0x30) - Prijaty UNIX cas: %lu", unix_timestamp);
+
+									// 2. Převod a uložení do struktur
+									RTC_TimeTypeDef sTime = {0};
+									RTC_DateTypeDef sDate = {0};
+									Convert_UnixToRTC(unix_timestamp, &sTime, &sDate);
+
+									// 3. Fyzický zápis do hardwaru STM32
+									// (Zásadní je pořadí: Vždy SetTime a hned po něm SetDate, jinak čip zamrzne datum)
+									HAL_RTC_SetTime(&hrtc, &sTime, RTC_FORMAT_BIN);
+									HAL_RTC_SetDate(&hrtc, &sDate, RTC_FORMAT_BIN);
+
+									APP_DBG(">>> RTC SERIZENO NA: 20%02d-%02d-%02d %02d:%02d:%02d",
+											sDate.Year, sDate.Month, sDate.Date,
+											sTime.Hours, sTime.Minutes, sTime.Seconds);
+
+									// 4. Odeslání potvrzení (ACK) do mobilu
+									uint8_t ack_time[4] = {0x30, 0x01, 0x00, 0x00};
+									BLE_Tunnel_Send(ack_time, 4);
+
+								} else {
+									// Špatná délka dat - posíláme chybu
+									uint8_t err_time[4] = {0x30, 0xEE, 0x00, 0x00};
+									BLE_Tunnel_Send(err_time, 4);
+								}
+							} else {
+								APP_DBG(">>> BLE SECURITY: Prikaz zamitnut (ZAMCENO)");
+								uint8_t err_lock[4] = {cmd, 0xAA, 0x00, 0x00}; BLE_Tunnel_Send(err_lock, 4);
+							}
 							break;
 
 						case CMD_SLEEP: // CMD_SLEEP (Návrat z BLE do MAC)

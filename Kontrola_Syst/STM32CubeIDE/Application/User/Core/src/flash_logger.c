@@ -1,11 +1,31 @@
+
 #include "flash_logger.h"
-#include "app_common.h"
-#include "app_conf.h"
 #include "dbg_trace.h"
-#include <string.h>
+#include "app_conf.h"
+#include "app_common.h"
+#include <stdbool.h>
+#include "stm32wbxx_hal.h"
+
+extern IWDG_HandleTypeDef hiwdg; // Potřebujeme sáhnout na psa v main.c
 
 static uint32_t current_flash_ptr = LOGGER_START_ADDR;
 static uint16_t current_punch_index = 0;
+
+// =============================================================================
+// VÝPOČET CRC-32 (Standardní IEEE 802.3 polynom)
+// =============================================================================
+static uint32_t Calculate_CRC32(uint8_t *data, uint32_t length)
+{
+    uint32_t crc = 0xFFFFFFFF;
+    for (uint32_t i = 0; i < length; i++) {
+        crc ^= data[i];
+        for (uint8_t j = 0; j < 8; j++) {
+            if (crc & 1) crc = (crc >> 1) ^ 0xEDB88320;
+            else crc >>= 1;
+        }
+    }
+    return crc ^ 0xFFFFFFFF;
+}
 
 // Interní pomocná funkce pro smazání 4KB stránky
 static void ErasePage(uint32_t page_address)
@@ -199,17 +219,69 @@ static void Config_FactoryReset(void)
 	APP_DBG("CONFIG: Tovarni nastaveni uspesne zapsano!");
 }
 
+// =============================================================================
+// HLAVNÍ INICIALIZACE A ZÁCHRANNÝ RESET (Voláno z main.c)
+// =============================================================================
 void Config_Init(void)
 {
-	if (DEVICE_CONFIG->magic_word != 0xCAFECAFE)
+	// 1. ZÁCHRANNÁ BRZDA: Kontrola tlačítka SW3 při startu desky
+	// Tlačítko je Active-Low (Při stisku vrací 0, v klidu 1)
+	if (BSP_PB_GetState(BUTTON_SW3) == 0)
 	{
-		APP_DBG("CONFIG: Pamet prazdna nebo poskozena!");
-		Config_FactoryReset();
+		// Krátká prodleva pro odfiltrování zákmitů
+		HAL_Delay(50);
+
+		// Pokud je i po 50 ms stále stisknuto, myslí to uživatel vážně
+		if (BSP_PB_GetState(BUTTON_SW3) == 0)
+		{
+			uint8_t hold_time = 0;
+
+			// Cyklus běží POUZE dokud uživatel fyzicky drží tlačítko
+			while(BSP_PB_GetState(BUTTON_SW3) == 0) {
+				HAL_Delay(100);
+				hold_time++;
+
+				// !!! KRITICKÉ: Nakrmíme psa, aby nás během držení nesežral !!!
+				HAL_IWDG_Refresh(&hiwdg);
+
+				if(hold_time > 30) { // 30 * 100ms = 3 vteřiny
+					APP_DBG(">>> SECURITY: DETEKOVAN ZACHRANNY RESET TLACITKEM! <<<");
+					Config_FactoryReset(); // Smaže konfiguraci a vrátí PIN na 123456
+
+					// Zablikáme pro potvrzení úspěchu
+					for(int i=0; i<10; i++) { BSP_LED_Toggle(LED_RED); HAL_Delay(50); }
+					BSP_LED_Off(LED_RED);
+					break; // Vyskočíme z cyklu
+				}
+			}
+		}
+	}
+
+	// =========================================================================
+	// 2. KONTROLA INTEGRITY PAMĚTI (Magic Word + CRC-32)
+	// =========================================================================
+
+	// Zkopírujeme si obsah Flash do RAM, abychom s ním mohli pracovat
+	BeaconConfig_t temp_cfg;
+	memcpy(&temp_cfg, (void*)DEVICE_CONFIG, sizeof(BeaconConfig_t));
+
+	// Uložíme si přečtené CRC a pole pro výpočet vynulujeme
+	uint32_t saved_crc = temp_cfg.control_sum;
+	temp_cfg.control_sum = 0;
+
+	// Spočítáme kontrolní součet z dat
+	uint32_t calculated_crc = Calculate_CRC32((uint8_t*)&temp_cfg, sizeof(BeaconConfig_t));
+
+	// Pokud nesedí magické slovo NEBO nesedí CRC, paměť je zničená/prázdná
+	if (DEVICE_CONFIG->magic_word != 0xCAFECAFE || saved_crc != calculated_crc)
+	{
+			APP_DBG("CONFIG: Pamet neznama nebo poskozena! (CRC: Ocekavano %08X, Precteno %08X)", calculated_crc, saved_crc);
+			Config_FactoryReset();
 	}
 	else
 	{
-		APP_DBG("CONFIG: Nacteno OK. ID Kontroly: %u, TX Power: %d dBm",
-						 DEVICE_CONFIG->stat_device_type, DEVICE_CONFIG->tx_power);
+			APP_DBG("CONFIG: Nacteno OK. Kontrola: %d (Vlastník: %s)",
+											 DEVICE_CONFIG->stat_device_type, DEVICE_CONFIG->team_owner);
 	}
 }
 
@@ -260,11 +332,56 @@ void System_FactoryResetAll(void)
 	NVIC_SystemReset();
 }
 
-void Logger_GetDownloadData(uint8_t cmd, uint8_t param, uint8_t **start_ptr, uint32_t *len)
+// ZMĚNĚNO: parametr 'param' je nyní uint32_t! (Nezapomeň upravit i v hlavičce flash_logger.h)
+void Logger_GetDownloadData(uint8_t cmd, uint32_t param, uint8_t **start_ptr, uint32_t *len)
 {
-	// Kontrola je jen jednoduchý kruhový buffer od začátku
-	*start_ptr = (uint8_t*)LOGGER_START_ADDR;
-	*len = (current_flash_ptr - LOGGER_START_ADDR);
-	APP_DBG("LOGGER: Pripraveno ke stazeni %lu bajtu", *len);
+	uint32_t ptr = current_flash_ptr;
+	uint32_t count = 0;
+	uint32_t max_records = (LOGGER_MAX_PAGES * LOGGER_PAGE_SIZE) / 8; // Absolutní maximum
+	uint32_t target_count = max_records; // Výchozí stav pro 0x21 (Stáhni VŠE)
+
+	if (cmd == 0x24) { // CMD_DOWNLOAD_LAST_N
+		target_count = param;
+		if (target_count > max_records) target_count = max_records; // Ochrana proti nesmyslnému N
+	}
+
+	// Couváme záznam po záznamu
+	while (count < target_count) {
+		uint32_t prev_ptr = ptr;
+
+		// Krok zpět s ošetřením přetečení kruhového bufferu
+		if (prev_ptr == LOGGER_START_ADDR) {
+			prev_ptr = LOGGER_START_ADDR + (LOGGER_MAX_PAGES * LOGGER_PAGE_SIZE);
+		}
+		prev_ptr -= 8;
+
+		// Kontrola, zda jsme nenarazili na smazanou paměť (Konec reálných historických dat)
+		uint64_t val = *(volatile uint64_t*)prev_ptr;
+		if (val == 0xFFFFFFFFFFFFFFFF) {
+			break;
+		}
+
+		// Pro příkaz 0x23 (Od UNIX času) čteme samotný časový údaj
+		if (cmd == 0x23) {
+			uint32_t record_time;
+			// Zkopírujeme natvrdo poslední 4 bajty z 8bajtového záznamu (Time razítko)
+			memcpy(&record_time, (void*)(prev_ptr + 4), 4);
+
+			// Upozornění: Pokud do logu ten unix time ukládáš v Big Endian,
+			// musíš tady to číslo z 'record_time' otočit zpět, jinak porovnání selže.
+			if (record_time < param) {
+				break; // Našli jsme záznam starší než požadovaný čas, dál už nejdeme!
+			}
+		}
+
+		// Záznam vyhovuje, posuneme náš pomyslný startovní ukazatel
+		ptr = prev_ptr;
+		count++;
+	}
+
+	*start_ptr = (uint8_t*)ptr;
+	*len = count * 8; // Počet nalezených záznamů x 8 bajtů
+
+	APP_DBG(">>> LOGGER: Pripraveno. Start: 0x%08X, Delka: %lu bajtu (%lu zaznamu)", *start_ptr, *len, count);
 }
 
