@@ -94,6 +94,9 @@ void APP_FFD_MAC_802_15_4_Init( APP_MAC_802_15_4_InitMode_t InitMode, TL_CmdPack
   APP_ENTRY_TL_MAC_802_15_4_Init();
   SHCI_C2_MAC_802_15_4_Init();
 
+  // Inicializace tlačítka SW2 (Simulace magnetu) v režimu přerušení
+	BSP_PB_Init(BUTTON_SW2, BUTTON_MODE_EXTI);
+
   /* Register task */
   UTIL_SEQ_RegTask( 1<<CFG_TASK_MSG_FROM_RF_CORE, UTIL_SEQ_RFU, APP_ENTRY_ProcessMsgFromRFCoreTask);
   UTIL_SEQ_RegTask( 1<<CFG_TASK_FFD, UTIL_SEQ_RFU,APP_FFD_MAC_802_15_4_SetupTask);
@@ -407,9 +410,19 @@ static void BeaconTimer_Callback(void)
 		fatal_error_counter = 0; // Rádio odpovědělo, vše je OK
 	}
 
-	// Získáme periodu z konfigurace. Pokud je tam nesmysl (např. 0), dáme bezpečný fallback 50 ms.
-	uint32_t period_ms = DEVICE_CONFIG->beacon_period_ms;
-	if (period_ms < 10) period_ms = 50;
+	// =========================================================================
+	// STAVOVÝ AUTOMAT: VÝPOČET FREKVENCE MAJÁKU
+	// =========================================================================
+	uint32_t period_ms;
+
+	if (current_state == STATE_IDLE_MAC) {
+		// ÚSPORNÝ REŽIM: 1x za sekundu (Šetříme baterii před závodem)
+		period_ms = 1000;
+	} else {
+		// ZÁVODNÍ REŽIM: Rychlá palba podle konfigurace (např. 50 ms)
+		period_ms = DEVICE_CONFIG->beacon_period_ms;
+		if (period_ms < 10) period_ms = 50; // Bezpečnostní pojistka
+	}
 
 	// Časovač nezávisle a neúprosně tiká
 	HW_TS_Start(BeaconTimerId, (uint32_t)(period_ms * 1000 / CFG_TS_TICK_VAL));

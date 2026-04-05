@@ -196,6 +196,12 @@ static void Config_FactoryReset(void)
 
 	strcpy(def_cfg.team_owner, "Vychozi Oddil");
 
+	// =================================================================
+	// OPRAVA: Výpočet a uložení CRC-32 před zápisem!
+	// =================================================================
+	def_cfg.control_sum = 0; // Pro jistotu vynulujeme před výpočtem
+	def_cfg.control_sum = Calculate_CRC32((uint8_t*)&def_cfg, sizeof(BeaconConfig_t));
+
 	// --- ZÁPIS DO FLASH PAMĚTI ---
 	EraseConfigPage();
 
@@ -291,6 +297,12 @@ void Config_Init(void)
 
 void Config_Commit(BeaconConfig_t *new_cfg)
 {
+	// =================================================================
+	// OPRAVA: Výpočet a uložení CRC-32 před uložením do paměti!
+	// =================================================================
+	new_cfg->control_sum = 0;
+	new_cfg->control_sum = Calculate_CRC32((uint8_t*)new_cfg, sizeof(BeaconConfig_t));
+
 	EraseConfigPage();
 	uint8_t *data_ptr = (uint8_t*)new_cfg;
 	uint32_t flash_ptr = CONFIG_FLASH_ADDR;

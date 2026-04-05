@@ -29,6 +29,16 @@ extern "C" {
 
 #include "802_15_4_mac_types.h"
 
+typedef enum {
+    STATE_STORAGE = 0, // Hluboký spánek (Shutdown). Probuzení JEN magnetem.
+    STATE_IDLE_MAC,    // Víkendový režim. Rádio běží pomalu (např. 1 Hz).
+    STATE_ACTIVE_MAC,  // Závod. Rádio pálí majáky naplno (např. 20 Hz).
+    STATE_BLE_CONFIG   // Konfigurace. MAC je mrtvý, běží BLE.
+} BeaconState_t;
+
+// Výchozí stav po vložení baterie / resetu
+extern volatile BeaconState_t current_state;
+
 MAC_Status_t APP_MAC_mlmeAssociateCnfCb( const  MAC_associateCnf_t * pAssociateCnf );
 MAC_Status_t APP_MAC_mlmeAssociateIndCb( const  MAC_associateInd_t * pAssociateInd );
 MAC_Status_t APP_MAC_mlmeBeaconNotifyIndCb( const  MAC_beaconNotifyInd_t * pBeaconNotifyInd );

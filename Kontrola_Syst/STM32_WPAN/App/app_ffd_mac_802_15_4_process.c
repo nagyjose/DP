@@ -17,6 +17,8 @@
 #include <stdbool.h>
 #include "flash_logger.h"
 
+volatile BeaconState_t current_state = STATE_IDLE_MAC;
+
 /* Global variables ----------------------------------------------------------*/
 int volatile FrameOnGoing = FALSE;
 extern MAC_associateInd_t g_MAC_associateInd;
@@ -255,6 +257,14 @@ void APP_MAC_ReceiveData(void)
 	// Pokud Kontrola chytí 3bajtový paket (Odpověď od Závodníka)
 	if (g_DataInd.msdu_length == 3)
 	{
+		// =====================================================================
+		// STAVOVÝ AUTOMAT: PROBUZENÍ Z VÍKENDOVÉHO REŽIMU
+		// =====================================================================
+		if (current_state == STATE_IDLE_MAC) {
+			current_state = STATE_ACTIVE_MAC;
+			APP_DBG(">>> AUTOMAT: Kontrola probuzena do ZAVODNIHO rezimu!");
+		}
+
 		uint8_t *payload = g_DataInd.msduPtr;
 
 		// 1. Zpětná dešifrace prvního bajtu (Typ a ID)
@@ -313,6 +323,10 @@ void APP_MAC_ReceiveData(void)
 			if (received_id_or_hash == expected_hash)
 			{
 				APP_DBG(">>> HASH SOUHLASI! INICIOVANO PREPNUTI DO BLE!");
+
+				// AUTOMAT: Přejít do módu Konfigurace
+				current_state = STATE_BLE_CONFIG;
+
 				// Vyvoláme úkol pro ukončení MAC a spuštění BLE
 				UTIL_SEQ_SetTask(1U << CFG_TASK_INIT_SWITCH_PROTOCOL, CFG_SCH_PRIO_0);
 			}
@@ -361,3 +375,41 @@ MAC_Status_t APP_MAC_mlmeAssociateCnfCb(const MAC_associateCnf_t * pAssociateCnf
 MAC_Status_t APP_MAC_mlmeAssociateIndCb(const MAC_associateInd_t * pAssociateInd) { return MAC_NOT_IMPLEMENTED_STATUS; }
 MAC_Status_t APP_MAC_mlmeBeaconNotifyIndCb(const MAC_beaconNotifyInd_t * pBeaconNotifyInd) { return MAC_NOT_IMPLEMENTED_STATUS; }
 // ... (Zde muzes klidne nechat smazane nebo jako NOT_IMPLEMENTED vsechny ostatni callbacky z puvodniho souboru)
+
+// =============================================================================
+// OBSLUHA HARDWAROVÝCH PŘERUŠENÍ (MAGNET / TLAČÍTKO)
+// =============================================================================
+void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
+{
+	// Detekce tlačítka SW2 (Na Nucleo desce simuluje přiložení magnetu)
+	if (GPIO_Pin == BUTTON_SW2_PIN)
+	{
+		// Zamezení zákmitům (Jednoduchý softwarový debouncing)
+		static uint32_t last_trigger_time = 0;
+		if (HAL_GetTick() - last_trigger_time < 500) return; // Ignoruj další stisk po dobu 500 ms
+		last_trigger_time = HAL_GetTick();
+
+		// LOGIKA MAGNETU
+		if (current_state == STATE_IDLE_MAC) {
+			current_state = STATE_ACTIVE_MAC;
+			APP_DBG(">>> MAGNET: Kontrola probuzena do ZAVODNIHO rezimu! <<<");
+
+			// Zablikáme a zapípáme pro vizuální potvrzení roznášeči (např. 2 sekundy)
+			blink_counter = 8; // 8 tiků po 250 ms = 2 sekundy
+			is_signal_active = false;
+			UTIL_SEQ_SetTask(1 << CFG_TASK_BUZZER, CFG_SCH_PRIO_0);
+		}
+		else if (current_state == STATE_ACTIVE_MAC) {
+			// Volitelné: Můžeme nechat magnet i pro případné manuální uspání zpět do IDLE
+			current_state = STATE_IDLE_MAC;
+			APP_DBG(">>> MAGNET: Kontrola uspana do VIKENDOVEHO rezimu! <<<");
+
+			// Pípneme jen krátce 1x na znamení uspání
+			blink_counter = 2;
+			is_signal_active = false;
+			UTIL_SEQ_SetTask(1 << CFG_TASK_BUZZER, CFG_SCH_PRIO_0);
+		}
+	}
+}
+
+
