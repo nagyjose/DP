@@ -47,6 +47,7 @@ typedef struct
 void P2PS_APP_Init(void);
 void P2PS_APP_Notification(P2PS_APP_ConnHandle_Not_evt_t *pNotification);
 void BLE_Tunnel_Send(uint8_t *pPayload, uint16_t length);
+void System_Execute_Command(uint8_t *payload_data, uint8_t payload_len, uint8_t source);
 
 #endif /* P2P_SERVER_APP_H */
 
