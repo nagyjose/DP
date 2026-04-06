@@ -46,6 +46,7 @@
 #include "dbg_trace.h"
 #include "flash_logger.h"
 #include <stdio.h>  // Pro funkci snprintf
+#include "app_nbiot.h"
 
 // Tady si definuješ fyzickou revizi desky a typ
 #define HW_REV_BASE "Rev 2.1 Kontrola"
@@ -120,6 +121,7 @@ int main( void )
 
 	Logger_Init(); // Najde, kde jsme před havárií přestali zapisovat
 	Config_Init();
+	NBIOT_FIFO_Init();
 
 	while(1)
 	{

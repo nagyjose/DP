@@ -16,6 +16,7 @@
 #include <stdlib.h> // Pro funkci rand()
 #include <stdbool.h>
 #include "flash_logger.h"
+#include "app_nbiot.h"
 
 volatile BeaconState_t current_state = STATE_IDLE_MAC;
 
@@ -319,6 +320,9 @@ void APP_MAC_ReceiveData(void)
 
 			// Zápis do kruhového bufferu s Erase-Ahead logikou
 			Logger_SavePunch_Kontrola(payload, sub_sec, unix_time);
+
+			// Vhodíme 3 bajty závodníka a čas do FIFO fronty!
+			NBIOT_FIFO_Push(payload, unix_time);
 
 			// =================================================================
 			// ASYNCHRONNÍ PÍPNUTÍ A BLIKNUTÍ (Čisté využití hotového API)

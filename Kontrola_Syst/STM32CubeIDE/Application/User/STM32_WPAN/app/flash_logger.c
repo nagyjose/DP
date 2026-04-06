@@ -6,6 +6,7 @@
 #include <stdbool.h>
 #include "stm32wbxx_hal.h"
 
+
 extern IWDG_HandleTypeDef hiwdg; // Potřebujeme sáhnout na psa v main.c
 
 static uint32_t current_flash_ptr = LOGGER_START_ADDR;

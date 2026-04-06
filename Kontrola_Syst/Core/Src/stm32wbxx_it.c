@@ -134,12 +134,12 @@ void CFG_HW_USART1_DMA_TX_IRQHandler( void )
 }
 #endif
 
-#if(CFG_HW_LPUART1_ENABLED == 1)
+/*#if(CFG_HW_LPUART1_ENABLED == 1)
 void LPUART1_IRQHandler(void)
 {
   HW_UART_Interrupt_Handler(hw_lpuart1);
 }
-#endif
+#endif*/
 
 #if(CFG_HW_LPUART1_DMA_TX_SUPPORTED == 1)
 void CFG_HW_LPUART1_DMA_TX_IRQHandler( void )
