@@ -21,6 +21,9 @@
 extern void System_Signalize_Start(uint8_t seconds);
 extern void Get_ADC_Measurements(int8_t *out_temp, uint16_t *out_batt_mv);
 
+// --- PŘIDÁNO: Dopředná deklarace naší nové funkce ---
+void System_Send_ACK(uint8_t *payload, uint8_t length, uint8_t source);
+
 // --- NAŠE UNIKÁTNÍ UUID (128-bit) ---
 #define COPY_SERVICE_UUID(uuid_struct) { \
   (uuid_struct)[0]=0x19; (uuid_struct)[1]=0xed; (uuid_struct)[2]=0x82; (uuid_struct)[3]=0xae; \
@@ -319,408 +322,9 @@ static SVCCTL_EvtAckStatus_t Tunnel_Event_Handler(void *pckt)
 				// Zápis do RX Charakteristiky (Ověření Handle)
 				if (mod->Attr_Handle == (RxCharHdle + 1))
 				{
-					BLE_Command_t cmd = (BLE_Command_t)mod->Attr_Data[0];
-
-					// Bezpečnostní pojistka: Kdyby ještě běžel starý přenos, natvrdo ho zrušíme
-					chunk_rem_len = 0;
-
-					// =========================================================
-					// ROZCESTNÍK PŘÍKAZŮ (COMMAND DICTIONARY)
-					// =========================================================
-					switch(cmd)
-					{
-						case CMD_READ_CONFIG: // CMD_READ_CONFIG
-							APP_DBG(">>> BLE CMD: READ CONFIG (0x10) - Odesilam %d bajtu", sizeof(BeaconConfig_t));
-							chunk_ptr = (uint8_t*)DEVICE_CONFIG;
-							chunk_rem_len = sizeof(BeaconConfig_t);
-							chunk_active_cmd = cmd;
-							UTIL_SEQ_SetTask(1 << CFG_TASK_BLE_CHUNKER, CFG_SCH_PRIO_0);
-							break;
-
-							// =====================================================
-							// RYCHLÝ STATUS KONTROLY (0x11)
-							// =====================================================
-							case CMD_GET_STATUS:
-								if (is_unlocked) {
-									uint8_t status_payload[12]; // Zvětšeno na 12 bajtů
-									int8_t temp_c;
-									uint16_t bat_mv;
-									Get_ADC_Measurements(&temp_c, &bat_mv);
-
-									// Vyčtení RTC hodin (POZOR: Musí se číst Time a hned po něm Date!)
-									RTC_TimeTypeDef sTime = {0};
-									RTC_DateTypeDef sDate = {0};
-									HAL_RTC_GetTime(&hrtc, &sTime, RTC_FORMAT_BIN);
-									HAL_RTC_GetDate(&hrtc, &sDate, RTC_FORMAT_BIN);
-									uint32_t unix_now = Convert_RTCToUnix(&sDate, &sTime);
-
-									status_payload[0] = 0x11; // Odpověď na příkaz
-
-									// 1. ID Kontroly (16 bitů)
-									status_payload[1] = (DEVICE_CONFIG->stat_device_type >> 8) & 0xFF;
-									status_payload[2] = DEVICE_CONFIG->stat_device_type & 0xFF;
-
-									// 2. Vysílací parametry (Perioda, Výkon, Bzučák)
-									status_payload[3] = DEVICE_CONFIG->beacon_period_ms;
-									status_payload[4] = DEVICE_CONFIG->tx_power;
-									status_payload[5] = DEVICE_CONFIG->buzzer_onoff;
-
-									// 3. Napětí baterie (16 bitů v milivoltech)
-									status_payload[6] = (bat_mv >> 8) & 0xFF;
-									status_payload[7] = bat_mv & 0xFF;
-
-									// 4. PŘIDÁNO: Aktuální UNIX čas v Kontrole (32 bitů)
-									status_payload[8] = (unix_now >> 24) & 0xFF;
-									status_payload[9] = (unix_now >> 16) & 0xFF;
-									status_payload[10] = (unix_now >> 8) & 0xFF;
-									status_payload[11] = unix_now & 0xFF;
-
-									APP_DBG(">>> BLE CMD: GET STATUS (0x11) - Baterie: %d mV, Cas: %lu", bat_mv, unix_now);
-									BLE_Tunnel_Send(status_payload, 12);
-								} else {
-									uint8_t err_lock[4] = {cmd, 0xAA, 0x00, 0x00}; BLE_Tunnel_Send(err_lock, 4);
-								}
-								break;
-
-							// =====================================================
-							// SAMOSTATNÉ MĚŘENÍ BATERIE (0x14)
-							// =====================================================
-							case CMD_GET_BATTERY:
-								if (is_unlocked) {
-									uint8_t bat_payload[3];
-									int8_t temp_c;
-									uint16_t bat_mv;
-									Get_ADC_Measurements(&temp_c, &bat_mv);
-
-									bat_payload[0] = 0x14; // Odpověď na příkaz
-									bat_payload[1] = (bat_mv >> 8) & 0xFF;
-									bat_payload[2] = bat_mv & 0xFF;
-
-									APP_DBG(">>> BLE CMD: GET BATTERY (0x14) - Napeti: %d mV", bat_mv);
-									BLE_Tunnel_Send(bat_payload, 3);
-								} else {
-									uint8_t err_lock[4] = {cmd, 0xAA, 0x00, 0x00}; BLE_Tunnel_Send(err_lock, 4);
-								}
-								break;
-
-							case CMD_DOWNLOAD_ALL:
-							case CMD_DOWNLOAD_FROM_TIME:
-							case CMD_DOWNLOAD_LAST_N:
-							{
-								uint32_t param = 0;
-
-								// Pokud mobil k příkazu přibalil 4 bajty dat (N, nebo UNIX čas)
-								if (mod->Attr_Data_Length >= 5) {
-									param = ((uint32_t)mod->Attr_Data[1] << 24) |
-													((uint32_t)mod->Attr_Data[2] << 16) |
-													((uint32_t)mod->Attr_Data[3] << 8)  |
-													 (uint32_t)mod->Attr_Data[4];
-								}
-
-								uint8_t *data_ptr = NULL;
-								uint32_t data_len = 0;
-
-								// Předáme požadavek paměťovému modulu (všimni si, že param je nyní uint32_t!)
-								extern void Logger_GetDownloadData(uint8_t cmd, uint32_t param, uint8_t **start_ptr, uint32_t *len);
-								Logger_GetDownloadData(cmd, param, &data_ptr, &data_len);
-
-								if (data_len > 0 && data_ptr != NULL) {
-									APP_DBG(">>> BLE CMD: Odesilam LOGY (0x%02X) - Delka: %lu bajtu", cmd, data_len);
-									chunk_ptr = data_ptr;
-									chunk_rem_len = data_len;
-									chunk_active_cmd = cmd;
-									UTIL_SEQ_SetTask(1 << CFG_TASK_BLE_CHUNKER, CFG_SCH_PRIO_0);
-								} else {
-									APP_DBG(">>> BLE CMD: Zadne logy k odeslani (nebo zadne nevyhovuji)!");
-									uint8_t ack_empty[4] = {cmd, 0x00, 0x00, 0x00};
-									BLE_Tunnel_Send(ack_empty, 4);
-								}
-								break;
-							}
-
-						case CMD_IDENTIFY: // CMD_IDENTIFY (Najdi můj čip)
-							APP_DBG(">>> BLE CMD: IDENTIFY (0x40) - Zacinam signalizovat!");
-
-							// 10 vteřin blikání a pípání
-							System_Signalize_Start(10);
-
-							// Odpovíme mobilu, že úkol běží
-							uint8_t ack_id[4] = {0x40, 0x01, 0x00, 0x00};
-							BLE_Tunnel_Send(ack_id, 4);
-							break;
-
-						case CMD_SYNC_TIME: // CMD_SYNC_TIME (Seřízení RTC hodin Kontroly)
-							if (is_unlocked) {
-								// OPRAVA: Musíme si z paketu správně vytáhnout délku a data
-								uint8_t payload_len = mod->Attr_Data_Length - 1; // Mínus 1 bajt za samotný příkaz
-								uint8_t *time_payload = &mod->Attr_Data[1];      // Data začínají na indexu 1
-
-								if (payload_len == 4) {
-									// 1. Složení 4 bajtů (MSB First) do uint32_t
-									uint32_t unix_timestamp = ((uint32_t)time_payload[0] << 24) |
-																((uint32_t)time_payload[1] << 16) |
-																((uint32_t)time_payload[2] << 8)  |
-																((uint32_t)time_payload[3]);
-
-									APP_DBG(">>> BLE CMD: SYNC TIME (0x30) - Prijaty UNIX cas: %lu", unix_timestamp);
-
-									// 2. Převod a uložení do struktur
-									RTC_TimeTypeDef sTime = {0};
-									RTC_DateTypeDef sDate = {0};
-									Convert_UnixToRTC(unix_timestamp, &sTime, &sDate);
-
-									// 3. Fyzický zápis do hardwaru STM32
-									// (Zásadní je pořadí: Vždy SetTime a hned po něm SetDate, jinak čip zamrzne datum)
-									HAL_RTC_SetTime(&hrtc, &sTime, RTC_FORMAT_BIN);
-									HAL_RTC_SetDate(&hrtc, &sDate, RTC_FORMAT_BIN);
-
-									APP_DBG(">>> RTC SERIZENO NA: 20%02d-%02d-%02d %02d:%02d:%02d",
-											sDate.Year, sDate.Month, sDate.Date,
-											sTime.Hours, sTime.Minutes, sTime.Seconds);
-
-									// 4. Odeslání potvrzení (ACK) do mobilu
-									uint8_t ack_time[4] = {0x30, 0x01, 0x00, 0x00};
-									BLE_Tunnel_Send(ack_time, 4);
-
-								} else {
-									// Špatná délka dat - posíláme chybu
-									uint8_t err_time[4] = {0x30, 0xEE, 0x00, 0x00};
-									BLE_Tunnel_Send(err_time, 4);
-								}
-							} else {
-								APP_DBG(">>> BLE SECURITY: Prikaz zamitnut (ZAMCENO)");
-								uint8_t err_lock[4] = {cmd, 0xAA, 0x00, 0x00}; BLE_Tunnel_Send(err_lock, 4);
-							}
-							break;
-
-						case CMD_SLEEP:
-							APP_DBG(">>> BLE CMD: SLEEP (0x51) - Zacinam slusne odpojovani...");
-							uint8_t ack_sleep[4] = {0x51, 0x01, 0x00, 0x00};
-							BLE_Tunnel_Send(ack_sleep, 4);
-
-							sleep_pending = true;
-							pending_disconnect_action = 1; // 1 = Zámek pro SLEEP
-
-							// Necháme rádio dýchat a za 100 ms spustíme finální odpojení
-							HW_TS_Start(DisconnectTimerId, (uint32_t)(100 * 1000 / CFG_TS_TICK_VAL));
-							break;
-
-						case CMD_POWER_OFF:
-							if (!is_unlocked) {
-								uint8_t err_lock[4] = {cmd, 0xAA, 0x00, 0x00};
-								BLE_Tunnel_Send(err_lock, 4);
-								break;
-							}
-
-							APP_DBG(">>> BLE CMD: POWER OFF (0x52) - Vypinam kontrolu...");
-							uint8_t ack_off[4] = {0x52, 0x01, 0x00, 0x00};
-							BLE_Tunnel_Send(ack_off, 4);
-
-							pending_disconnect_action = 2; // 2 = Zámek pro POWER_OFF
-
-							// Za 100 ms zabijeme procesor
-							HW_TS_Start(DisconnectTimerId, (uint32_t)(100 * 1000 / CFG_TS_TICK_VAL));
-							break;
-
-						// =====================================================
-						// 1A. KROK 1: MOBIL ŽÁDÁ O VÝZVU (0x05)
-						// Paket z mobilu: [0x05]
-						// =====================================================
-						case CMD_UNLOCK:
-							// Vygenerujeme náhodné číslo (Využijeme ticky procesoru a UDN čipu)
-							current_challenge = HAL_GetTick() ^ DEVICE_CONFIG->magic_word ^ LL_FLASH_GetUDN();
-
-							// Pokud by náhodou vyšla nula (neplatná výzva), změníme ji
-							if (current_challenge == 0) current_challenge = 0xDEADBEEF;
-
-							APP_DBG(">>> BLE SECURITY: Generuji vyzvu: %lu", current_challenge);
-
-							// Odešleme výzvu do mobilu (0x05 + 4 bajty výzvy)
-							uint8_t ack_chal[5] = {0x05,
-																		(current_challenge >> 24) & 0xFF,
-																		(current_challenge >> 16) & 0xFF,
-																		(current_challenge >> 8)  & 0xFF,
-																		 current_challenge        & 0xFF};
-							BLE_Tunnel_Send(ack_chal, 5);
-							break;
-
-						// =====================================================
-						// 1B. KROK 2: MOBIL POSÍLÁ RESPONSE K OVĚŘENÍ (0x07)
-						// Paket z mobilu: [0x07] [Resp_1] [Resp_2] [Resp_3] [Resp_4]
-						// =====================================================
-						case CMD_VERIFY_HASH:
-							if (mod->Attr_Data_Length >= 5) {
-								// Přečteme Response od mobilu
-								uint32_t received_response = ((uint32_t)mod->Attr_Data[1] << 24) |
-																						 ((uint32_t)mod->Attr_Data[2] << 16) |
-																						 ((uint32_t)mod->Attr_Data[3] << 8)  |
-																							(uint32_t)mod->Attr_Data[4];
-
-								// Vypočítáme si, co měl mobil reálně poslat (POUŽIJEME hash_device)
-								uint32_t expected_response = Generate_Response(current_challenge, DEVICE_CONFIG->hash_device);
-
-								// Ověření! (Zároveň kontrolujeme, že výzva byla vůbec vygenerována)
-								if (received_response == expected_response && current_challenge != 0) {
-									is_unlocked = true;
-									current_challenge = 0; // Výzva se smí použít jen jednou! (Obrana proti replay)
-
-									// Zkopírujeme aktuální stav z Flash do naší RAM (Stagingu)
-									memcpy(&staged_config, (void*)DEVICE_CONFIG, sizeof(BeaconConfig_t));
-
-									APP_DBG(">>> BLE SECURITY: ODEMCENO! Hash sedi. Relace spustena.");
-									uint8_t ack[4] = {0x07, 0x01, 0x00, 0x00}; BLE_Tunnel_Send(ack, 4);
-								} else {
-									APP_DBG(">>> BLE SECURITY: SPATNA ODPOVED! Utocnik?");
-									current_challenge = 0; // Při chybě výzvu okamžitě spálíme
-									uint8_t ack[4] = {0x07, 0xEE, 0x00, 0x00}; BLE_Tunnel_Send(ack, 4);
-								}
-							}
-							break;
-
-						// =====================================================
-						// 2. ZAMČENÍ RELACE (0x06)
-						// Paket: [0x06]
-						// =====================================================
-						case CMD_LOCK:
-							is_unlocked = false;
-							memset(&staged_config, 0, sizeof(BeaconConfig_t)); // Bezpečný výmaz RAM
-							APP_DBG(">>> BLE SECURITY: ZAMCENO uzivatelem.");
-							uint8_t ack_lock[4] = {0x06, 0x01, 0x00, 0x00}; BLE_Tunnel_Send(ack_lock, 4);
-							break;
-
-						// =====================================================
-						// 3. POSTUPNÉ SKLÁDÁNÍ DO RAM (0x12 - STAGE PARAMETER)
-						// Paket: [0x12] [ID] [Offset_H] [Offset_L] [Data...]
-						// =====================================================
-						case CMD_STAGE_PARAM:
-							if (!is_unlocked) {
-									APP_DBG(">>> BLE SECURITY: Zamitnuto (ZAMCENO)");
-									uint8_t ack[4] = {0x12, 0xEE, 0x00, 0x00}; BLE_Tunnel_Send(ack, 4);
-									break;
-							}
-
-							if (mod->Attr_Data_Length >= 5) {
-								Config_Param_t param_id = (Config_Param_t)mod->Attr_Data[1];
-								uint16_t offset = (mod->Attr_Data[2] << 8) | mod->Attr_Data[3];
-								uint8_t data_len = mod->Attr_Data_Length - 4;
-								uint8_t *payload = &mod->Attr_Data[4];
-
-								APP_DBG(">>> BLE STAGE: Param 0x%02X, Offset: %d, Delka: %d", param_id, offset, data_len);
-
-								// Úprava konkrétních proměnných KONTROLY v RAM
-								switch (param_id) {
-									// --- 1. ZÁKLADNÍ INFORMACE ---
-									case PARAM_BLE_DEVICE_NAME: if (offset + data_len <= 32) memcpy(&staged_config.BLE_device_name[offset], payload, data_len); break;
-									case PARAM_HASH_DEVICE: if (data_len >= 4) staged_config.hash_device = ((uint32_t)payload[0]<<24) | ((uint32_t)payload[1]<<16) | ((uint32_t)payload[2]<<8) | payload[3]; break;
-
-									// --- 2. VYSÍLANÉ INFORMACE ---
-									case PARAM_STAT_DEVICE_TYPE: if (data_len >= 2) staged_config.stat_device_type = ((uint16_t)payload[0]<<8) | payload[1]; break;
-									case PARAM_REQ_RSSI: if (data_len >= 1) staged_config.required_rssi = payload[0]; break;
-									case PARAM_EVENT_NATION: if (data_len >= 1) staged_config.event_nation = payload[0]; break;
-									case PARAM_EVENT_ID: if (data_len >= 4) staged_config.event_id = ((uint32_t)payload[0]<<24) | ((uint32_t)payload[1]<<16) | ((uint32_t)payload[2]<<8) | payload[3]; break;
-
-									// --- 3. NASTAVOVACÍ PARAMETRY ---
-									case PARAM_BEACON_PERIOD_MS: if (data_len >= 1) staged_config.beacon_period_ms = payload[0]; break;
-									case PARAM_BEACON_PERIOD_LP: if (data_len >= 1) staged_config.beacon_period_ms_lp = payload[0]; break;
-									case PARAM_BUZZER_ONOFF: if (data_len >= 1) staged_config.buzzer_onoff = payload[0]; break;
-									case PARAM_TX_POWER: if (data_len >= 1) staged_config.tx_power = (int8_t)payload[0]; break;
-									case PARAM_BAT_ALERT_THRESH: if (data_len >= 1) staged_config.battery_alert_threshold = payload[0]; break;
-
-									// --- 4. TEXTY A VLASTNÍK (Ukázka několika) ---
-									case PARAM_TEAM_OWNER: if (offset + data_len <= 64) memcpy(&staged_config.team_owner[offset], payload, data_len); break;
-									case PARAM_TEAM_EMAIL: if (offset + data_len <= 64) memcpy(&staged_config.team_email[offset], payload, data_len); break;
-									case PARAM_TEAM_OTHER_INFO: if (offset + data_len <= 1024) memcpy(&staged_config.team_other_info[offset], payload, data_len); break;
-									// (Zde si můžeš dopsat zbytek podle potřeby)
-
-									// --- 5. NB-IOT ---
-									case PARAM_NBIOT_APN: if (offset + data_len <= 32) memcpy(&staged_config.nbiot_apn[offset], payload, data_len); break;
-									case PARAM_NBIOT_IP: if (offset + data_len <= 32) memcpy(&staged_config.nbiot_server_ip[offset], payload, data_len); break;
-									case PARAM_NBIOT_PORT: if (data_len >= 2) staged_config.nbiot_server_port = ((uint16_t)payload[0]<<8) | payload[1]; break;
-
-									default:
-										APP_DBG(">>> BLE STAGE: Neznamy parametr (0x%02X)", param_id);
-										uint8_t ack_err[4] = {0x12, 0xEE, param_id, 0x00}; BLE_Tunnel_Send(ack_err, 4);
-										break;
-								}
-
-								uint8_t ack[4] = {0x12, 0x01, param_id, 0x00}; BLE_Tunnel_Send(ack, 4);
-							}
-							break;
-
-						// =====================================================
-						// 4. HROMADNÝ ZÁPIS DO FLASH (0x13 - COMMIT)
-						// Paket: [0x13]
-						// =====================================================
-						case CMD_COMMIT_CONFIG:
-							if (!is_unlocked) {
-								uint8_t ack[4] = {0x13, 0xEE, 0x00, 0x00}; BLE_Tunnel_Send(ack, 4);
-								break;
-							}
-
-							APP_DBG(">>> BLE COMMIT: Zapisuji vsechny RAM upravy do Flash!");
-							Config_Commit(&staged_config);
-
-							uint8_t ack_com[4] = {0x13, 0x01, 0x00, 0x00}; BLE_Tunnel_Send(ack_com, 4);
-							break;
-
-						// =====================================================
-						// 5. BEZPEČNÝ FORMÁT PAMĚTI (0x99)
-						// Nyní nevyžaduje PIN v paketu, protože je chráněn zámkem!
-						// =====================================================
-						case CMD_FORMAT_HISTORY:
-							if (!is_unlocked) {
-								APP_DBG(">>> BLE SECURITY: Zamitnuto - Formát vyžaduje odemknuti!");
-								uint8_t ack[4] = {0x99, 0xEE, 0x00, 0x00}; BLE_Tunnel_Send(ack, 4);
-								break;
-							}
-
-							APP_DBG(">>> BLE CMD: FORMATOVANI PAMETI ZAVODNIKA! (0x99)");
-							chunk_rem_len = 0;
-							Logger_FormatAll();
-							uint8_t ack_fmt[4] = {0x99, 0x01, 0x00, 0x00}; BLE_Tunnel_Send(ack_fmt, 4);
-							break;
-						//}
-
-						// =====================================================
-						// 6. FACTORY RESET POUZE KONFIGURACE (0x97)
-						// =====================================================
-						case CMD_RESET_CONFIG:
-							if (!is_unlocked) {
-								uint8_t ack[4] = {0x97, 0xEE, 0x00, 0x00}; BLE_Tunnel_Send(ack, 4);
-								break;
-							}
-
-							// Odešleme mobilu zprávu o úspěchu ještě PŘED restartem
-							uint8_t ack_97[4] = {0x97, 0x01, 0x00, 0x00};
-							BLE_Tunnel_Send(ack_97, 4);
-
-							// Necháme paket 100 ms odletět a pak desku zabijeme
-							HAL_Delay(100);
-							Config_EraseAndReboot();
-							break;
-
-						// =====================================================
-						// 7. KOMPLETNÍ FACTORY RESET - VŠE (0x98)
-						// =====================================================
-						case CMD_RESET_ALL:
-							if (!is_unlocked) {
-								uint8_t ack[4] = {0x98, 0xEE, 0x00, 0x00}; BLE_Tunnel_Send(ack, 4);
-								break;
-							}
-
-							// Odešleme mobilu zprávu o úspěchu ještě PŘED restartem
-							uint8_t ack_98[4] = {0x98, 0x01, 0x00, 0x00};
-							BLE_Tunnel_Send(ack_98, 4);
-
-							// Necháme paket 100 ms odletět a pak spustíme kompletní destrukci
-							HAL_Delay(100);
-							System_FactoryResetAll();
-							break;
-
-						default:
-							APP_DBG(">>> BLE CMD: NEZNAMY PRIKAZ (0x%02X)", cmd);
-							break;
-					}
+					// Odtud data jednoduše "přepošleme" do našeho agnostického jádra!
+					// Parametr source = 0 (Znamená, že volajícím je BLE)
+					System_Execute_Command(mod->Attr_Data, mod->Attr_Data_Length, 0);
 				}
 				break;
 			}
@@ -728,6 +332,419 @@ static SVCCTL_EvtAckStatus_t Tunnel_Event_Handler(void *pckt)
 	}
 	return SVCCTL_EvtNotAck;
 }
+
+// =============================================================================
+// AGNOSTICKÉ JÁDRO PRO ZPRACOVÁNÍ PŘÍKAZŮ (Voláno z BLE, NB-IoT i USB)
+// source: 0 = BLE, 1 = NB-IoT, 2 = USB
+// =============================================================================
+void System_Execute_Command(uint8_t *payload_data, uint8_t payload_len, uint8_t source)
+{
+	if (payload_len == 0) return;
+
+	BLE_Command_t cmd = (BLE_Command_t)payload_data[0];
+
+	// Bezpečnostní pojistka: Kdyby ještě běžel starý přenos, natvrdo ho zrušíme
+	chunk_rem_len = 0;
+
+	// =========================================================
+	// ROZCESTNÍK PŘÍKAZŮ (COMMAND DICTIONARY)
+	// =========================================================
+	switch(cmd)
+	{
+		case CMD_READ_CONFIG: // CMD_READ_CONFIG
+			APP_DBG(">>> BLE CMD: READ CONFIG (0x10) - Odesilam %d bajtu", sizeof(BeaconConfig_t));
+			chunk_ptr = (uint8_t*)DEVICE_CONFIG;
+			chunk_rem_len = sizeof(BeaconConfig_t);
+			chunk_active_cmd = cmd;
+			UTIL_SEQ_SetTask(1 << CFG_TASK_BLE_CHUNKER, CFG_SCH_PRIO_0);
+			break;
+
+			// =====================================================
+			// RYCHLÝ STATUS KONTROLY (0x11)
+			// =====================================================
+			case CMD_GET_STATUS:
+				if (is_unlocked) {
+					uint8_t status_payload[12]; // Zvětšeno na 12 bajtů
+					int8_t temp_c;
+					uint16_t bat_mv;
+					Get_ADC_Measurements(&temp_c, &bat_mv);
+
+					// Vyčtení RTC hodin (POZOR: Musí se číst Time a hned po něm Date!)
+					RTC_TimeTypeDef sTime = {0};
+					RTC_DateTypeDef sDate = {0};
+					HAL_RTC_GetTime(&hrtc, &sTime, RTC_FORMAT_BIN);
+					HAL_RTC_GetDate(&hrtc, &sDate, RTC_FORMAT_BIN);
+					uint32_t unix_now = Convert_RTCToUnix(&sDate, &sTime);
+
+					status_payload[0] = 0x11; // Odpověď na příkaz
+
+					// 1. ID Kontroly (16 bitů)
+					status_payload[1] = (DEVICE_CONFIG->stat_device_type >> 8) & 0xFF;
+					status_payload[2] = DEVICE_CONFIG->stat_device_type & 0xFF;
+
+					// 2. Vysílací parametry (Perioda, Výkon, Bzučák)
+					status_payload[3] = DEVICE_CONFIG->beacon_period_ms;
+					status_payload[4] = DEVICE_CONFIG->tx_power;
+					status_payload[5] = DEVICE_CONFIG->buzzer_onoff;
+
+					// 3. Napětí baterie (16 bitů v milivoltech)
+					status_payload[6] = (bat_mv >> 8) & 0xFF;
+					status_payload[7] = bat_mv & 0xFF;
+
+					// 4. PŘIDÁNO: Aktuální UNIX čas v Kontrole (32 bitů)
+					status_payload[8] = (unix_now >> 24) & 0xFF;
+					status_payload[9] = (unix_now >> 16) & 0xFF;
+					status_payload[10] = (unix_now >> 8) & 0xFF;
+					status_payload[11] = unix_now & 0xFF;
+
+					APP_DBG(">>> BLE CMD: GET STATUS (0x11) - Baterie: %d mV, Cas: %lu", bat_mv, unix_now);
+					System_Send_ACK(status_payload, 12, source);
+				} else {
+					uint8_t err_lock[4] = {cmd, 0xAA, 0x00, 0x00}; System_Send_ACK(err_lock, 4, source);
+				}
+				break;
+
+			// =====================================================
+			// SAMOSTATNÉ MĚŘENÍ BATERIE (0x14)
+			// =====================================================
+			case CMD_GET_BATTERY:
+				if (is_unlocked) {
+					uint8_t bat_payload[3];
+					int8_t temp_c;
+					uint16_t bat_mv;
+					Get_ADC_Measurements(&temp_c, &bat_mv);
+
+					bat_payload[0] = 0x14; // Odpověď na příkaz
+					bat_payload[1] = (bat_mv >> 8) & 0xFF;
+					bat_payload[2] = bat_mv & 0xFF;
+
+					APP_DBG(">>> BLE CMD: GET BATTERY (0x14) - Napeti: %d mV", bat_mv);
+					System_Send_ACK(bat_payload, 3, source);
+				} else {
+					uint8_t err_lock[4] = {cmd, 0xAA, 0x00, 0x00}; System_Send_ACK(err_lock, 4, source);
+				}
+				break;
+
+			case CMD_DOWNLOAD_ALL:
+			case CMD_DOWNLOAD_FROM_TIME:
+			case CMD_DOWNLOAD_LAST_N:
+			{
+				uint32_t param = 0;
+
+				// Pokud mobil k příkazu přibalil 4 bajty dat (N, nebo UNIX čas)
+				if (payload_len >= 5) {
+					param = ((uint32_t)payload_data[1] << 24) |
+									((uint32_t)payload_data[2] << 16) |
+									((uint32_t)payload_data[3] << 8)  |
+									 (uint32_t)payload_data[4];
+				}
+
+				uint8_t *data_ptr = NULL;
+				uint32_t data_len = 0;
+
+				// Předáme požadavek paměťovému modulu (všimni si, že param je nyní uint32_t!)
+				extern void Logger_GetDownloadData(uint8_t cmd, uint32_t param, uint8_t **start_ptr, uint32_t *len);
+				Logger_GetDownloadData(cmd, param, &data_ptr, &data_len);
+
+				if (data_len > 0 && data_ptr != NULL) {
+					APP_DBG(">>> BLE CMD: Odesilam LOGY (0x%02X) - Delka: %lu bajtu", cmd, data_len);
+					chunk_ptr = data_ptr;
+					chunk_rem_len = data_len;
+					chunk_active_cmd = cmd;
+					UTIL_SEQ_SetTask(1 << CFG_TASK_BLE_CHUNKER, CFG_SCH_PRIO_0);
+				} else {
+					APP_DBG(">>> BLE CMD: Zadne logy k odeslani (nebo zadne nevyhovuji)!");
+					uint8_t ack_empty[4] = {cmd, 0x00, 0x00, 0x00};
+					System_Send_ACK(ack_empty, 4, source);
+				}
+				break;
+			}
+
+		case CMD_IDENTIFY: // CMD_IDENTIFY (Najdi můj čip)
+			APP_DBG(">>> BLE CMD: IDENTIFY (0x40) - Zacinam signalizovat!");
+
+			// 10 vteřin blikání a pípání
+			System_Signalize_Start(10);
+
+			// Odpovíme mobilu, že úkol běží
+			uint8_t ack_id[4] = {0x40, 0x01, 0x00, 0x00};
+			System_Send_ACK(ack_id, 4, source);
+			break;
+
+		case CMD_SYNC_TIME: // CMD_SYNC_TIME (Seřízení RTC hodin Kontroly)
+			if (is_unlocked) {
+				// OPRAVA: Musíme si z paketu správně vytáhnout délku a data
+				uint8_t time_payload_len = payload_len - 1; // Mínus 1 bajt za samotný příkaz
+				uint8_t *time_payload = &payload_data[1];      // Data začínají na indexu 1
+
+				if (time_payload_len == 4) {
+					// 1. Složení 4 bajtů (MSB First) do uint32_t
+					uint32_t unix_timestamp = ((uint32_t)time_payload[0] << 24) |
+												((uint32_t)time_payload[1] << 16) |
+												((uint32_t)time_payload[2] << 8)  |
+												((uint32_t)time_payload[3]);
+
+					APP_DBG(">>> BLE CMD: SYNC TIME (0x30) - Prijaty UNIX cas: %lu", unix_timestamp);
+
+					// 2. Převod a uložení do struktur
+					RTC_TimeTypeDef sTime = {0};
+					RTC_DateTypeDef sDate = {0};
+					Convert_UnixToRTC(unix_timestamp, &sTime, &sDate);
+
+					// 3. Fyzický zápis do hardwaru STM32
+					// (Zásadní je pořadí: Vždy SetTime a hned po něm SetDate, jinak čip zamrzne datum)
+					HAL_RTC_SetTime(&hrtc, &sTime, RTC_FORMAT_BIN);
+					HAL_RTC_SetDate(&hrtc, &sDate, RTC_FORMAT_BIN);
+
+					APP_DBG(">>> RTC SERIZENO NA: 20%02d-%02d-%02d %02d:%02d:%02d",
+							sDate.Year, sDate.Month, sDate.Date,
+							sTime.Hours, sTime.Minutes, sTime.Seconds);
+
+					// 4. Odeslání potvrzení (ACK) do mobilu
+					uint8_t ack_time[4] = {0x30, 0x01, 0x00, 0x00};
+					System_Send_ACK(ack_time, 4, source);
+
+				} else {
+					// Špatná délka dat - posíláme chybu
+					uint8_t err_time[4] = {0x30, 0xEE, 0x00, 0x00};
+					System_Send_ACK(err_time, 4, source);
+				}
+			} else {
+				APP_DBG(">>> BLE SECURITY: Prikaz zamitnut (ZAMCENO)");
+				uint8_t err_lock[4] = {cmd, 0xAA, 0x00, 0x00}; System_Send_ACK(err_lock, 4, source);
+			}
+			break;
+
+		case CMD_SLEEP:
+			APP_DBG(">>> BLE CMD: SLEEP (0x51) - Zacinam slusne odpojovani...");
+			uint8_t ack_sleep[4] = {0x51, 0x01, 0x00, 0x00};
+			System_Send_ACK(ack_sleep, 4, source);
+
+			sleep_pending = true;
+			pending_disconnect_action = 1; // 1 = Zámek pro SLEEP
+
+			// Necháme rádio dýchat a za 100 ms spustíme finální odpojení
+			HW_TS_Start(DisconnectTimerId, (uint32_t)(100 * 1000 / CFG_TS_TICK_VAL));
+			break;
+
+		case CMD_POWER_OFF:
+			if (!is_unlocked) {
+				uint8_t err_lock[4] = {cmd, 0xAA, 0x00, 0x00};
+				System_Send_ACK(err_lock, 4, source);
+				break;
+			}
+
+			APP_DBG(">>> BLE CMD: POWER OFF (0x52) - Vypinam kontrolu...");
+			uint8_t ack_off[4] = {0x52, 0x01, 0x00, 0x00};
+			System_Send_ACK(ack_off, 4, source);
+
+			pending_disconnect_action = 2; // 2 = Zámek pro POWER_OFF
+
+			// Za 100 ms zabijeme procesor
+			HW_TS_Start(DisconnectTimerId, (uint32_t)(100 * 1000 / CFG_TS_TICK_VAL));
+			break;
+
+		// =====================================================
+		// 1A. KROK 1: MOBIL ŽÁDÁ O VÝZVU (0x05)
+		// Paket z mobilu: [0x05]
+		// =====================================================
+		case CMD_UNLOCK:
+			// Vygenerujeme náhodné číslo (Využijeme ticky procesoru a UDN čipu)
+			current_challenge = HAL_GetTick() ^ DEVICE_CONFIG->magic_word ^ LL_FLASH_GetUDN();
+
+			// Pokud by náhodou vyšla nula (neplatná výzva), změníme ji
+			if (current_challenge == 0) current_challenge = 0xDEADBEEF;
+
+			APP_DBG(">>> BLE SECURITY: Generuji vyzvu: %lu", current_challenge);
+
+			// Odešleme výzvu do mobilu (0x05 + 4 bajty výzvy)
+			uint8_t ack_chal[5] = {0x05,
+														(current_challenge >> 24) & 0xFF,
+														(current_challenge >> 16) & 0xFF,
+														(current_challenge >> 8)  & 0xFF,
+														 current_challenge        & 0xFF};
+			System_Send_ACK(ack_chal, 5, source);
+			break;
+
+		// =====================================================
+		// 1B. KROK 2: MOBIL POSÍLÁ RESPONSE K OVĚŘENÍ (0x07)
+		// Paket z mobilu: [0x07] [Resp_1] [Resp_2] [Resp_3] [Resp_4]
+		// =====================================================
+		case CMD_VERIFY_HASH:
+			if (payload_len >= 5) {
+				// Přečteme Response od mobilu
+				uint32_t received_response = ((uint32_t)payload_data[1] << 24) |
+																		 ((uint32_t)payload_data[2] << 16) |
+																		 ((uint32_t)payload_data[3] << 8)  |
+																			(uint32_t)payload_data[4];
+
+				// Vypočítáme si, co měl mobil reálně poslat (POUŽIJEME hash_device)
+				uint32_t expected_response = Generate_Response(current_challenge, DEVICE_CONFIG->hash_device);
+
+				// Ověření! (Zároveň kontrolujeme, že výzva byla vůbec vygenerována)
+				if (received_response == expected_response && current_challenge != 0) {
+					is_unlocked = true;
+					current_challenge = 0; // Výzva se smí použít jen jednou! (Obrana proti replay)
+
+					// Zkopírujeme aktuální stav z Flash do naší RAM (Stagingu)
+					memcpy(&staged_config, (void*)DEVICE_CONFIG, sizeof(BeaconConfig_t));
+
+					APP_DBG(">>> BLE SECURITY: ODEMCENO! Hash sedi. Relace spustena.");
+					uint8_t ack[4] = {0x07, 0x01, 0x00, 0x00}; System_Send_ACK(ack, 4, source);
+				} else {
+					APP_DBG(">>> BLE SECURITY: SPATNA ODPOVED! Utocnik?");
+					current_challenge = 0; // Při chybě výzvu okamžitě spálíme
+					uint8_t ack[4] = {0x07, 0xEE, 0x00, 0x00}; System_Send_ACK(ack, 4, source);
+				}
+			}
+			break;
+
+		// =====================================================
+		// 2. ZAMČENÍ RELACE (0x06)
+		// Paket: [0x06]
+		// =====================================================
+		case CMD_LOCK:
+			is_unlocked = false;
+			memset(&staged_config, 0, sizeof(BeaconConfig_t)); // Bezpečný výmaz RAM
+			APP_DBG(">>> BLE SECURITY: ZAMCENO uzivatelem.");
+			uint8_t ack_lock[4] = {0x06, 0x01, 0x00, 0x00}; System_Send_ACK(ack_lock, 4, source);
+			break;
+
+		// =====================================================
+		// 3. POSTUPNÉ SKLÁDÁNÍ DO RAM (0x12 - STAGE PARAMETER)
+		// Paket: [0x12] [ID] [Offset_H] [Offset_L] [Data...]
+		// =====================================================
+		case CMD_STAGE_PARAM:
+			if (!is_unlocked) {
+					APP_DBG(">>> BLE SECURITY: Zamitnuto (ZAMCENO)");
+					uint8_t ack[4] = {0x12, 0xEE, 0x00, 0x00}; System_Send_ACK(ack, 4, source);
+					break;
+			}
+
+			if (payload_len >= 5) {
+				Config_Param_t param_id = (Config_Param_t)payload_data[1];
+				uint16_t offset = (payload_data[2] << 8) | payload_data[3];
+				uint8_t data_len = payload_len - 4;
+				uint8_t *payload = &payload_data[4];
+
+				APP_DBG(">>> BLE STAGE: Param 0x%02X, Offset: %d, Delka: %d", param_id, offset, data_len);
+
+				// Úprava konkrétních proměnných KONTROLY v RAM
+				switch (param_id) {
+					// --- 1. ZÁKLADNÍ INFORMACE ---
+					case PARAM_BLE_DEVICE_NAME: if (offset + data_len <= 32) memcpy(&staged_config.BLE_device_name[offset], payload, data_len); break;
+					case PARAM_HASH_DEVICE: if (data_len >= 4) staged_config.hash_device = ((uint32_t)payload[0]<<24) | ((uint32_t)payload[1]<<16) | ((uint32_t)payload[2]<<8) | payload[3]; break;
+
+					// --- 2. VYSÍLANÉ INFORMACE ---
+					case PARAM_STAT_DEVICE_TYPE: if (data_len >= 2) staged_config.stat_device_type = ((uint16_t)payload[0]<<8) | payload[1]; break;
+					case PARAM_REQ_RSSI: if (data_len >= 1) staged_config.required_rssi = payload[0]; break;
+					case PARAM_EVENT_NATION: if (data_len >= 1) staged_config.event_nation = payload[0]; break;
+					case PARAM_EVENT_ID: if (data_len >= 4) staged_config.event_id = ((uint32_t)payload[0]<<24) | ((uint32_t)payload[1]<<16) | ((uint32_t)payload[2]<<8) | payload[3]; break;
+
+					// --- 3. NASTAVOVACÍ PARAMETRY ---
+					case PARAM_BEACON_PERIOD_MS: if (data_len >= 1) staged_config.beacon_period_ms = payload[0]; break;
+					case PARAM_BEACON_PERIOD_LP: if (data_len >= 1) staged_config.beacon_period_ms_lp = payload[0]; break;
+					case PARAM_BUZZER_ONOFF: if (data_len >= 1) staged_config.buzzer_onoff = payload[0]; break;
+					case PARAM_TX_POWER: if (data_len >= 1) staged_config.tx_power = (int8_t)payload[0]; break;
+					case PARAM_BAT_ALERT_THRESH: if (data_len >= 1) staged_config.battery_alert_threshold = payload[0]; break;
+
+					// --- 4. TEXTY A VLASTNÍK (Ukázka několika) ---
+					case PARAM_TEAM_OWNER: if (offset + data_len <= 64) memcpy(&staged_config.team_owner[offset], payload, data_len); break;
+					case PARAM_TEAM_EMAIL: if (offset + data_len <= 64) memcpy(&staged_config.team_email[offset], payload, data_len); break;
+					case PARAM_TEAM_OTHER_INFO: if (offset + data_len <= 1024) memcpy(&staged_config.team_other_info[offset], payload, data_len); break;
+					// (Zde si můžeš dopsat zbytek podle potřeby)
+
+					// --- 5. NB-IOT ---
+					case PARAM_NBIOT_APN: if (offset + data_len <= 32) memcpy(&staged_config.nbiot_apn[offset], payload, data_len); break;
+					case PARAM_NBIOT_IP: if (offset + data_len <= 32) memcpy(&staged_config.nbiot_server_ip[offset], payload, data_len); break;
+					case PARAM_NBIOT_PORT: if (data_len >= 2) staged_config.nbiot_server_port = ((uint16_t)payload[0]<<8) | payload[1]; break;
+
+					default:
+						APP_DBG(">>> BLE STAGE: Neznamy parametr (0x%02X)", param_id);
+						uint8_t ack_err[4] = {0x12, 0xEE, param_id, 0x00}; System_Send_ACK(ack_err, 4, source);
+						break;
+				}
+
+				uint8_t ack[4] = {0x12, 0x01, param_id, 0x00}; System_Send_ACK(ack, 4, source);
+			}
+			break;
+
+		// =====================================================
+		// 4. HROMADNÝ ZÁPIS DO FLASH (0x13 - COMMIT)
+		// Paket: [0x13]
+		// =====================================================
+		case CMD_COMMIT_CONFIG:
+			if (!is_unlocked) {
+				uint8_t ack[4] = {0x13, 0xEE, 0x00, 0x00}; System_Send_ACK(ack, 4, source);
+				break;
+			}
+
+			APP_DBG(">>> BLE COMMIT: Zapisuji vsechny RAM upravy do Flash!");
+			Config_Commit(&staged_config);
+
+			uint8_t ack_com[4] = {0x13, 0x01, 0x00, 0x00}; System_Send_ACK(ack_com, 4, source);
+			break;
+
+		// =====================================================
+		// 5. BEZPEČNÝ FORMÁT PAMĚTI (0x99)
+		// Nyní nevyžaduje PIN v paketu, protože je chráněn zámkem!
+		// =====================================================
+		case CMD_FORMAT_HISTORY:
+			if (!is_unlocked) {
+				APP_DBG(">>> BLE SECURITY: Zamitnuto - Formát vyžaduje odemknuti!");
+				uint8_t ack[4] = {0x99, 0xEE, 0x00, 0x00}; System_Send_ACK(ack, 4, source);
+				break;
+			}
+
+			APP_DBG(">>> BLE CMD: FORMATOVANI PAMETI ZAVODNIKA! (0x99)");
+			chunk_rem_len = 0;
+			Logger_FormatAll();
+			uint8_t ack_fmt[4] = {0x99, 0x01, 0x00, 0x00}; System_Send_ACK(ack_fmt, 4, source);
+			break;
+		//}
+
+		// =====================================================
+		// 6. FACTORY RESET POUZE KONFIGURACE (0x97)
+		// =====================================================
+		case CMD_RESET_CONFIG:
+			if (!is_unlocked) {
+				uint8_t ack[4] = {0x97, 0xEE, 0x00, 0x00}; System_Send_ACK(ack, 4, source);
+				break;
+			}
+
+			// Odešleme mobilu zprávu o úspěchu ještě PŘED restartem
+			uint8_t ack_97[4] = {0x97, 0x01, 0x00, 0x00};
+			System_Send_ACK(ack_97, 4, source);
+
+			// Necháme paket 100 ms odletět a pak desku zabijeme
+			HAL_Delay(100);
+			Config_EraseAndReboot();
+			break;
+
+		// =====================================================
+		// 7. KOMPLETNÍ FACTORY RESET - VŠE (0x98)
+		// =====================================================
+		case CMD_RESET_ALL:
+			if (!is_unlocked) {
+				uint8_t ack[4] = {0x98, 0xEE, 0x00, 0x00}; System_Send_ACK(ack, 4, source);
+				break;
+			}
+
+			// Odešleme mobilu zprávu o úspěchu ještě PŘED restartem
+			uint8_t ack_98[4] = {0x98, 0x01, 0x00, 0x00};
+			System_Send_ACK(ack_98, 4, source);
+
+			// Necháme paket 100 ms odletět a pak spustíme kompletní destrukci
+			HAL_Delay(100);
+			System_FactoryResetAll();
+			break;
+
+		default:
+			APP_DBG(">>> BLE CMD: NEZNAMY PRIKAZ (0x%02X)", cmd);
+			break;
+	}
+}
+
 
 // -----------------------------------------------------------------------------
 // INICIALIZACE: Registrace Služeb do BLE Stacku
@@ -766,6 +783,24 @@ void P2PS_APP_Init(void) {
 
 void BLE_Tunnel_Send(uint8_t *pPayload, uint16_t length) {
 	aci_gatt_update_char_value(OrienteeringServiceHdle, TxCharHdle, 0, length, pPayload);
+}
+
+// =============================================================================
+// UNIVERZÁLNÍ ODESÍLATEL ODPOVĚDÍ (Směřuje ACK tam, odkud přišel dotaz)
+// =============================================================================
+void System_Send_ACK(uint8_t *payload, uint8_t length, uint8_t source) {
+	if (source == 0) {
+		// Odpověď do Bluetooth
+		BLE_Tunnel_Send(payload, length);
+	}
+	else if (source == 1) {
+		// Odpověď do NB-IoT (Připravíme si to pro Downlink)
+		// Zde později napojíme odeslání přes Quectel (např. přes FIFO)
+		APP_DBG(">>> SYS ACK: Smerovano do NB-IoT (Zatim neimplementovano)");
+	}
+	else if (source == 2) {
+		// Odpověď do USB (Pro budoucí použití)
+	}
 }
 
 // -----------------------------------------------------------------------------

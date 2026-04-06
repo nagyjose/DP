@@ -8,6 +8,7 @@
 #include "stm32wbxx_hal.h"
 #include <stdio.h>
 #include <stdlib.h> // Pro funkci atoi()
+#include "p2p_server_app.h" // Pro System_Execute_Command
 
 // SMAZÁNO: extern uint16_t Get_Battery_Voltage(void);
 // PŘIDÁNO: Přístup k unifikovanému měření z MAC vrstvy
@@ -53,6 +54,7 @@ typedef enum {
 	NB_STATE_SENDING,       // Fyzické odesílání 10 bajtů z fronty
 	NB_STATE_REQ_SEND,      // Čekáme na '>' z modulu
 	NB_STATE_WAITING_ACK,    // Čekáme, až nám náš server odpoví bajtem 0x01
+	NB_STATE_READ_DOWNLINK,  // <--- PŘIDÁNO (Čtení dat ze socketu)
 	NB_STATE_GET_CSQ
 } NBIOT_State_t;
 
@@ -125,8 +127,10 @@ static void Timer_Batch_Cb(void) {
 
 static void Timer_Poll_Cb(void) {
 	// Pokud jsme ve fázi čekání na ACK a vypršel timeout (5 vteřin), server neodpověděl!
-	if (current_nb_state == NB_STATE_WAITING_ACK || current_nb_state == NB_STATE_OPEN_SOCKET) {
-		APP_DBG("NBIOT TIMEOUT: Server neodpovedel (nebo selhalo spojeni)! Zacinam BACKOFF (5 min).");
+	if (current_nb_state == NB_STATE_WAITING_ACK ||
+			current_nb_state == NB_STATE_OPEN_SOCKET ||
+			current_nb_state == NB_STATE_READ_DOWNLINK) {
+		APP_DBG("NBIOT TIMEOUT: Modul neodpovedel! Zacinam BACKOFF (5 min).");
 		NBIOT_Send_AT("AT+QPOWD=1"); // Zavřít krám
 
 		is_backoff_active = true;
@@ -137,6 +141,23 @@ static void Timer_Poll_Cb(void) {
 		UTIL_SEQ_SetTask(1 << CFG_TASK_NBIOT_PROCESS, CFG_SCH_PRIO_0);
 	}
 }
+
+// =============================================================================
+// BEZPEČNOSTNÍ HASH (Anti-Spoofing pro UDP)
+// =============================================================================
+static uint32_t Calculate_Payload_Hash(uint8_t *data, uint16_t len, uint32_t secret_key) {
+	// Inicializujeme hash naším tajným PINem z Flash paměti
+	uint32_t hash = secret_key;
+
+	// Postupně "zamícháme" každý bajt odesílané zprávy
+	for (uint16_t i = 0; i < len; i++) {
+		hash ^= data[i];
+		hash *= 0x5bd1e995; // Magická konstanta z Murmur3
+		hash ^= hash >> 15;
+	}
+	return hash;
+}
+
 
 void NBIOT_FIFO_Init(void) {
 	nbiot_fifo.head = 0;
@@ -360,6 +381,19 @@ void NBIOT_Process_Task(void)
 					}
 				}
 
+				// =================================================================
+				// VIP: PŘIDÁNÍ BEZPEČNOSTNÍHO PODPISU (HASH)
+				// =================================================================
+				// Vypočítáme podpis z aktuálních dat, klíčem je náš tajný PIN
+				uint32_t packet_hash = Calculate_Payload_Hash(udp_payload, udp_payload_len, DEVICE_CONFIG->hash_device);
+
+				// Přilepíme 4 bajty podpisu na úplný konec zprávy
+				udp_payload[udp_payload_len++] = (packet_hash >> 24) & 0xFF;
+				udp_payload[udp_payload_len++] = (packet_hash >> 16) & 0xFF;
+				udp_payload[udp_payload_len++] = (packet_hash >> 8)  & 0xFF;
+				udp_payload[udp_payload_len++] = packet_hash & 0xFF;
+
+								// Odeslání do modulu Quectel
 				char cmd[32];
 				snprintf(cmd, sizeof(cmd), "AT+QISEND=0,%d", udp_payload_len);
 				NBIOT_Send_AT(cmd);
@@ -389,13 +423,48 @@ void NBIOT_Process_Task(void)
 			break;
 
 		case NB_STATE_WAITING_ACK:
-			// TADY SE ROZHODUJE: Přijde nám odpověď ze serveru?
+			// Server potvrdil příjem
 			if (strstr((char*)nbiot_rx_buffer, "+QIURC: \"recv\"") != NULL) {
-				// V reálu bychom zde ještě četli samotná data pres AT+QIRD,
-				// ale samotný fakt, že přišlo "recv", znamená, že s námi server mluví!
-				APP_DBG("NBIOT: >>> ACK OD SERVERU PRIJATO! Data bezpecne v cloudu. <<<");
+				APP_DBG("NBIOT: >>> ACK OD SERVERU! Zjistuji, zda poslal i nejaka data...");
 				nbiot_rx_buffer[0] = '\0';
 
+				// Požádáme modul, ať nám ze svého vnitřního bufferu "vyklopí" co přišlo
+				NBIOT_Send_AT("AT+QIRD=0");
+
+				current_nb_state = NB_STATE_READ_DOWNLINK;
+				// Máme 5 vteřin na to, abychom z modulu ta data vydolovali
+				HW_TS_Start(NbiotPollTimerId, (uint32_t)(5000 * 1000 / CFG_TS_TICK_VAL));
+			}
+			break;
+
+		case NB_STATE_READ_DOWNLINK:
+			// Modul pošle text "+QIRD: <delka>" a hned na dalším řádku čistá data
+			if (strstr((char*)nbiot_rx_buffer, "+QIRD:") != NULL) {
+
+				char *qird_ptr = strstr((char*)nbiot_rx_buffer, "+QIRD:");
+				int downlink_len = atoi(qird_ptr + 6); // Přečte číslo délky za textem
+
+				if (downlink_len > 0) {
+					APP_DBG("NBIOT: Ze serveru prislo %d bajtu! Predavam jadru...", downlink_len);
+
+					// Najdeme začátek samotných binárních dat (hledáme první Enter \n)
+					char *data_start = strchr(qird_ptr, '\n');
+
+					if (data_start != NULL) {
+						data_start++; // Posuneme ukazatel o 1 znak za ten Enter
+
+						// =========================================================
+						// MAGIE ZDE: Surová data hodíme do stejného procesoru jako BLE!
+						// Parametr '1' znamená, že zdroj je NB-IoT.
+						// =========================================================
+						System_Execute_Command((uint8_t*)data_start, downlink_len, 1);
+					}
+				} else {
+					APP_DBG("NBIOT: Server sice odpovedel, ale neposlal zadny prikaz.");
+				}
+
+				// Vše je hotovo, teď teprve můžeme jít klidně spát!
+				nbiot_rx_buffer[0] = '\0';
 				APP_DBG("NBIOT: Uspavam modul a spoustim BATCH (10s)");
 				NBIOT_Send_AT("AT+QPOWD=1");
 
@@ -527,11 +596,17 @@ void HAL_UARTEx_RxEventCallback(UART_HandleTypeDef *huart, uint16_t Size)
 			nbiot_rx_buffer[NBIOT_RX_BUFFER_SIZE - 1] = '\0';
 		}
 
-		// Pro debug vymažeme zbytečné konce řádků pro hezčí výpis
-		for(int i = 0; i < Size; i++) {
-			if (nbiot_rx_buffer[i] == '\r' || nbiot_rx_buffer[i] == '\n') nbiot_rx_buffer[i] = ' ';
+		// =========================================================
+		// OPRAVA: Čištění textu děláme, jen když nečekáme binární data!
+		// =========================================================
+		if (current_nb_state != NB_STATE_READ_DOWNLINK) {
+			for(int i = 0; i < Size; i++) {
+				if (nbiot_rx_buffer[i] == '\r' || nbiot_rx_buffer[i] == '\n') nbiot_rx_buffer[i] = ' ';
+			}
+			APP_DBG("<<< NBIOT RX: %s", nbiot_rx_buffer);
+		} else {
+			APP_DBG("<<< NBIOT RX: [Prijat raw blok o delce %d bajtu]", Size);
 		}
-		APP_DBG("<<< NBIOT RX: %s", nbiot_rx_buffer);
 
 		// ZPRÁVA KOMPLETNÍ: Probudíme hlavní NBIOT Task v Sequenceru!
 		UTIL_SEQ_SetTask(1 << CFG_TASK_NBIOT_PROCESS, CFG_SCH_PRIO_0);
