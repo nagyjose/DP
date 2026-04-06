@@ -192,18 +192,29 @@ void Race_StateMachine_Stop(void)
 extern ADC_HandleTypeDef hadc1; // Zpřístupníme ADC z main.c, pokud ho tam CubeMX generuje
 
 // =============================================================================
-// MANUÁLNÍ MĚŘENÍ TEPLOTY (BEZ CUBEMX)
+// HARDWARE DRIVER: UNIFIKOVANÉ MĚŘENÍ ADC (TEPLOTA + BATERIE)
 // =============================================================================
-static int8_t Get_MCU_Temperature(void)
+void Get_ADC_Measurements(int8_t *out_temp, uint16_t *out_batt_mv)
 {
 	ADC_HandleTypeDef hadc1 = {0};
 	ADC_ChannelConfTypeDef sConfig = {0};
-	int8_t temp = -128; // Výchozí hodnota při selhání
 
-	// Povolení hodin pro ADC
+	// Výchozí chybové hodnoty
+	*out_temp = -128;
+	*out_batt_mv = 0;
+
+	// 1. Povolení hodin
 	__HAL_RCC_ADC_CLK_ENABLE();
+	__HAL_RCC_GPIOA_CLK_ENABLE(); // Port pro baterii (uprav dle tvé desky)
 
-	// Konfigurace ADC "na holém železe"
+	// 2. Konfigurace pinu pro baterii (PA3 - Channel 4)
+	GPIO_InitTypeDef GPIO_InitStruct = {0};
+	GPIO_InitStruct.Pin = GPIO_PIN_3;
+	GPIO_InitStruct.Mode = GPIO_MODE_ANALOG;
+	GPIO_InitStruct.Pull = GPIO_NOPULL;
+	HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+
+	// 3. Základní konfigurace ADC
 	hadc1.Instance = ADC1;
 	hadc1.Init.ClockPrescaler = ADC_CLOCK_SYNC_PCLK_DIV4;
 	hadc1.Init.Resolution = ADC_RESOLUTION_12B;
@@ -220,50 +231,52 @@ static int8_t Get_MCU_Temperature(void)
 
 	if (HAL_ADC_Init(&hadc1) == HAL_OK)
 	{
-		// Kalibrace pro přesné měření
+		// Kalibrace se provede jen JEDNOU pro obě měření
 		HAL_ADCEx_Calibration_Start(&hadc1, ADC_SINGLE_ENDED);
 
-		// Nastavení kanálu pro vnitřní teplotní senzor
-		sConfig.Channel = ADC_CHANNEL_TEMPSENSOR;
+		// Společné nastavení kanálu
 		sConfig.Rank = ADC_REGULAR_RANK_1;
-		// 1. OPRAVA: Extrémně zpomalíme vzorkování (maximální možný čas pro nabití!)
-		sConfig.SamplingTime = ADC_SAMPLETIME_640CYCLES_5;
+		sConfig.SamplingTime = ADC_SAMPLETIME_640CYCLES_5; // Maximální čas na nabití
 		sConfig.SingleDiff = ADC_SINGLE_ENDED;
 		sConfig.OffsetNumber = ADC_OFFSET_NONE;
 		sConfig.Offset = 0;
 
+		// --- MĚŘENÍ 1: INTERNÍ TEPLOTA ---
+		sConfig.Channel = ADC_CHANNEL_TEMPSENSOR;
 		if (HAL_ADC_ConfigChannel(&hadc1, &sConfig) == HAL_OK)
 		{
-			// 2. OPRAVA: Dáme senzoru čas na fyzické probuzení a ustálení napětí
-			// Datasheet vyžaduje ~15 µs, funkce HAL_Delay(1) počká minimálně 1 ms, což je dokonale bezpečné.
-			HAL_Delay(1);
-
+			HAL_Delay(1); // Čas na ustálení interního senzoru
 			if (HAL_ADC_Start(&hadc1) == HAL_OK)
 			{
-				// Čekáme max 100 ms na změření
-				if (HAL_ADC_PollForConversion(&hadc1, 100) == HAL_OK)
-				{
+				if (HAL_ADC_PollForConversion(&hadc1, 100) == HAL_OK) {
 					uint32_t raw_val = HAL_ADC_GetValue(&hadc1);
-					// Standardní HAL makro, které použije tovární kalibrační hodnoty z paměti
-					temp = (int8_t)__LL_ADC_CALC_TEMPERATURE(3300, raw_val, LL_ADC_RESOLUTION_12B);
+					int8_t temp_raw = (int8_t)__LL_ADC_CALC_TEMPERATURE(3300, raw_val, LL_ADC_RESOLUTION_12B);
+					*out_temp = temp_raw - 2; // Aplikace kalibračního offsetu
 				}
 				HAL_ADC_Stop(&hadc1);
 			}
 		}
+
+		// --- MĚŘENÍ 2: NAPĚTÍ BATERIE ---
+		sConfig.Channel = ADC_CHANNEL_4; // PA3 = CH4
+		if (HAL_ADC_ConfigChannel(&hadc1, &sConfig) == HAL_OK)
+		{
+			HAL_Delay(1); // Čas na přebití kondenzátoru z nového pinu
+			if (HAL_ADC_Start(&hadc1) == HAL_OK)
+			{
+				if (HAL_ADC_PollForConversion(&hadc1, 100) == HAL_OK) {
+					uint32_t raw_val = HAL_ADC_GetValue(&hadc1);
+					*out_batt_mv = (raw_val * 3300) / 4095; // (x2 pokud máš dělič)
+				}
+				HAL_ADC_Stop(&hadc1);
+			}
+		}
+
 		HAL_ADC_DeInit(&hadc1);
 	}
 
-	// Vypneme hodiny pro úsporu baterie
 	__HAL_RCC_ADC_CLK_DISABLE();
-
-	// --- SOFTWAROVÁ KALIBRACE (Offset jádra) ---
-	if (temp != -128) { // Pokud měření neselhalo a nevrátilo výchozí dvacítku
-		temp = temp - 2;
-	}
-
-	return temp;
 }
-
 
 // -----------------------------------------------------------------------------
 // ASYNCHRONNÍ TASK PRO BLIKÁNÍ A PÍPÁNÍ
@@ -433,9 +446,6 @@ void APP_MAC_ReceiveData(void)
 			last_punch_tick = current_tick;
 			history_mask = 0;
 
-			// Závodník odesílá odpověď kontrole (obsahuje jeho ID a typ z Configu) [cite: 184, 185]
-			Send_Punch_Response();
-
 			// --- ANTI-SPAM LOGIKA & ZÁPIS DO FLASH [cite: 226, 227] ---
 			bool is_standard_control = (control_id >= 31 && control_id <= 4095) ||
 																 (control_id == CHECK_CONTROL_ID) ||
@@ -445,6 +455,12 @@ void APP_MAC_ReceiveData(void)
 
 			if (!is_spam)
 			{
+				// Závodník odesílá odpověď kontrole (obsahuje jeho ID a typ z Configu) [cite: 184, 185]
+				// Pošleme ji 3x pro jistotu doručení (Burst transmission)
+				for(int i=0; i<3; i++) {
+					Send_Punch_Response();
+				}
+
 				if (control_id == CLEAR_CONTROL_ID) {
 					Logger_NewRace(payload);
 					last_written_control_id = control_id;
@@ -457,7 +473,10 @@ void APP_MAC_ReceiveData(void)
 					}
 				} else {
 					uint8_t abs_rssi = (uint8_t)(-rssi);
-					int8_t teplota = Get_MCU_Temperature();
+					// ZÍSKÁNÍ SLOUČENÝCH ADC HODNOT
+					int8_t teplota;
+					uint16_t baterie_mv; // Zde baterii zatím nepotřebujeme, ale musíme ji přečíst
+					Get_ADC_Measurements(&teplota, &baterie_mv);
 					Logger_SavePunch(payload, abs_rssi, teplota);
 					last_written_control_id = control_id;
 

@@ -45,6 +45,7 @@ typedef enum {
 
     // --- Čtení dat ---
     CMD_READ_CONFIG         = 0x10,
+		CMD_GET_BATTERY         = 0x14, // <--- PŘIDÁNO: Samostatný stav baterie
     CMD_DOWNLOAD_CURRENT    = 0x20,
     CMD_DOWNLOAD_ALL        = 0x21,
     CMD_DOWNLOAD_SPECIFIC   = 0x22,
@@ -97,6 +98,8 @@ typedef enum {
     PARAM_COMP_MEDICAL_INFO = 0x15,
     PARAM_COMP_OTHER_INFO   = 0x16
 } Config_Param_t;
+
+extern void Get_ADC_Measurements(int8_t *out_temp, uint16_t *out_batt_mv);
 
 // =============================================================================
 // STAVOVÉ PROMĚNNÉ PRO KRÁJEČ (CHUNKER)
@@ -254,6 +257,28 @@ static SVCCTL_EvtAckStatus_t Tunnel_Event_Handler(void *pckt)
 							}
 							break;
 						}
+
+						// =====================================================
+						// SAMOSTATNÉ MĚŘENÍ BATERIE (0x14)
+						// =====================================================
+						case CMD_GET_BATTERY:
+							if (is_unlocked) {
+								uint8_t bat_payload[3];
+
+								int8_t teplota_dummy;
+								uint16_t bat_mv;
+								Get_ADC_Measurements(&teplota_dummy, &bat_mv);
+
+								bat_payload[0] = 0x14;
+								bat_payload[1] = (bat_mv >> 8) & 0xFF;
+								bat_payload[2] = bat_mv & 0xFF;
+
+								APP_DBG(">>> BLE CMD: GET BATTERY (0x14) - Napeti: %d mV", bat_mv);
+								BLE_Tunnel_Send(bat_payload, 3);
+							} else {
+								uint8_t err_lock[4] = {cmd, 0xAA, 0x00, 0x00}; BLE_Tunnel_Send(err_lock, 4);
+							}
+							break;
 
 						case CMD_IDENTIFY: // CMD_IDENTIFY (Najdi můj čip)
 							APP_DBG(">>> BLE CMD: IDENTIFY (0x40) - Zacinam signalizovat!");
