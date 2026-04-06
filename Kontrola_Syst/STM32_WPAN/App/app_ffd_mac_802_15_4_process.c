@@ -180,26 +180,29 @@ MAC_Status_t APP_MAC_mlmeStartCnfCb( const  MAC_startCnf_t * pStartCnf )
 }
 
 // =============================================================================
-// HARDWARE DRIVER: MĚŘENÍ BATERIE (ADC)
+// HARDWARE DRIVER: UNIFIKOVANÉ MĚŘENÍ ADC (TEPLOTA + BATERIE)
 // =============================================================================
-uint16_t Get_Battery_Voltage(void)
+void Get_ADC_Measurements(int8_t *out_temp, uint16_t *out_batt_mv)
 {
 	ADC_HandleTypeDef hadc1 = {0};
 	ADC_ChannelConfTypeDef sConfig = {0};
-	uint16_t battery_mv = 0; // Výsledek v milivoltech
+
+	// Výchozí chybové hodnoty
+	*out_temp = -128;
+	*out_batt_mv = 0;
 
 	// 1. Povolení hodin
 	__HAL_RCC_ADC_CLK_ENABLE();
-	__HAL_RCC_GPIOA_CLK_ENABLE(); // ZDE UPRAV PORT PODLE TVÉ DESKY (např. GPIOC)
+	__HAL_RCC_GPIOA_CLK_ENABLE(); // Port pro baterii (uprav dle tvé desky)
 
-	// 2. Konfigurace pinu pro analogový režim (Např. PA3)
+	// 2. Konfigurace pinu pro baterii (PA3 - Channel 4)
 	GPIO_InitTypeDef GPIO_InitStruct = {0};
-	GPIO_InitStruct.Pin = GPIO_PIN_3; // ZDE UPRAV PIN (např. GPIO_PIN_0)
+	GPIO_InitStruct.Pin = GPIO_PIN_3;
 	GPIO_InitStruct.Mode = GPIO_MODE_ANALOG;
 	GPIO_InitStruct.Pull = GPIO_NOPULL;
-	HAL_GPIO_Init(GPIOA, &GPIO_InitStruct); // ZDE UPRAV PORT
+	HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 
-	// 3. Konfigurace ADC (Stejně pomalé a bezpečné jako u teploměru)
+	// 3. Základní konfigurace ADC
 	hadc1.Instance = ADC1;
 	hadc1.Init.ClockPrescaler = ADC_CLOCK_SYNC_PCLK_DIV4;
 	hadc1.Init.Resolution = ADC_RESOLUTION_12B;
@@ -216,38 +219,51 @@ uint16_t Get_Battery_Voltage(void)
 
 	if (HAL_ADC_Init(&hadc1) == HAL_OK)
 	{
+		// Kalibrace se provede jen JEDNOU pro obě měření
 		HAL_ADCEx_Calibration_Start(&hadc1, ADC_SINGLE_ENDED);
 
-		sConfig.Channel = ADC_CHANNEL_4; // ZDE UPRAV KANÁL (PA3 = CH4)
+		// Společné nastavení kanálu
 		sConfig.Rank = ADC_REGULAR_RANK_1;
-		sConfig.SamplingTime = ADC_SAMPLETIME_640CYCLES_5; // Extrémně pomalé nabití pro přesnost
+		sConfig.SamplingTime = ADC_SAMPLETIME_640CYCLES_5; // Maximální čas na nabití
 		sConfig.SingleDiff = ADC_SINGLE_ENDED;
 		sConfig.OffsetNumber = ADC_OFFSET_NONE;
 		sConfig.Offset = 0;
 
+		// --- MĚŘENÍ 1: INTERNÍ TEPLOTA ---
+		sConfig.Channel = ADC_CHANNEL_TEMPSENSOR;
 		if (HAL_ADC_ConfigChannel(&hadc1, &sConfig) == HAL_OK)
 		{
-			HAL_Delay(1); // Dáme kondenzátoru a tranzistoru 1 ms na ustálení
-
+			HAL_Delay(1); // Čas na ustálení interního senzoru
 			if (HAL_ADC_Start(&hadc1) == HAL_OK)
 			{
-				if (HAL_ADC_PollForConversion(&hadc1, 100) == HAL_OK)
-				{
+				if (HAL_ADC_PollForConversion(&hadc1, 100) == HAL_OK) {
 					uint32_t raw_val = HAL_ADC_GetValue(&hadc1);
-
-					// PŘEVOD NA MILIVOLTY (Předpokládáme napájecí napětí VDDA = 3300 mV)
-					// Pokud máš na desce dělič napětí (např. R1=100k, R2=100k),
-					// musíš výsledek ještě vynásobit dvěma!
-					battery_mv = (raw_val * 3300) / 4095;
+					int8_t temp_raw = (int8_t)__LL_ADC_CALC_TEMPERATURE(3300, raw_val, LL_ADC_RESOLUTION_12B);
+					*out_temp = temp_raw - 2; // Aplikace kalibračního offsetu
 				}
 				HAL_ADC_Stop(&hadc1);
 			}
 		}
+
+		// --- MĚŘENÍ 2: NAPĚTÍ BATERIE ---
+		sConfig.Channel = ADC_CHANNEL_4; // PA3 = CH4
+		if (HAL_ADC_ConfigChannel(&hadc1, &sConfig) == HAL_OK)
+		{
+			HAL_Delay(1); // Čas na přebití kondenzátoru z nového pinu
+			if (HAL_ADC_Start(&hadc1) == HAL_OK)
+			{
+				if (HAL_ADC_PollForConversion(&hadc1, 100) == HAL_OK) {
+					uint32_t raw_val = HAL_ADC_GetValue(&hadc1);
+					*out_batt_mv = (raw_val * 3300) / 4095; // (x2 pokud máš dělič)
+				}
+				HAL_ADC_Stop(&hadc1);
+			}
+		}
+
 		HAL_ADC_DeInit(&hadc1);
 	}
 
 	__HAL_RCC_ADC_CLK_DISABLE();
-	return battery_mv;
 }
 
 // -----------------------------------------------------------------------------

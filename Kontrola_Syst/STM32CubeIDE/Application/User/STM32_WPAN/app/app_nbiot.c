@@ -7,6 +7,16 @@
 #include <string.h>
 #include "stm32wbxx_hal.h"
 #include <stdio.h>
+#include <stdlib.h> // Pro funkci atoi()
+
+// SMAZÁNO: extern uint16_t Get_Battery_Voltage(void);
+// PŘIDÁNO: Přístup k unifikovanému měření z MAC vrstvy
+extern void Get_ADC_Measurements(int8_t *out_temp, uint16_t *out_batt_mv);
+
+// --- NOVÉ PROMĚNNÉ PRO STATUS A BATERII ---
+static uint8_t last_csq = 99;         // 99 znamená "Neznámý signál"
+static bool is_nbiot_dead = false;    // Vlajka pro trvalé vypnutí modulu
+static uint8_t NbiotHeartbeatTimerId; // Časovač pro pravidelný Status
 
 
 // =============================================================================
@@ -42,7 +52,8 @@ typedef enum {
 	NB_STATE_OPEN_SOCKET,   // Otevírání UDP spojení
 	NB_STATE_SENDING,       // Fyzické odesílání 10 bajtů z fronty
 	NB_STATE_REQ_SEND,      // Čekáme na '>' z modulu
-	NB_STATE_WAITING_ACK    // Čekáme, až nám náš server odpoví bajtem 0x01
+	NB_STATE_WAITING_ACK,    // Čekáme, až nám náš server odpoví bajtem 0x01
+	NB_STATE_GET_CSQ
 } NBIOT_State_t;
 
 static uint8_t udp_payload[128]; // Buffer pro slepení závodníků
@@ -83,6 +94,22 @@ static uint8_t NbiotPollTimerId; // Časovač pro dotazování (AT+CGATT?)
 static bool is_backoff_active = false; // Běží 5minutová penalizace?
 static bool is_batch_active = false;   // Běží 10vteřinové okno pro nasbírání dat?
 static uint8_t cgatt_retries = 0;      // Kolikrát jsme se marně ptali na síť
+
+static void Timer_Heartbeat_Cb(void) {
+	// Pokud už jsme se kvůli baterii trvale vypnuli, Heartbeat neposíláme
+	if (is_nbiot_dead) return;
+
+	// Vytvoříme "fiktivního" závodníka (3 bajty 0xFF znamenají Status)
+	uint8_t dummy_runner[3] = {0xFF, 0xFF, 0xFF};
+
+	// Vhodíme ho do fronty (čas dáme 0, server si doplní vlastní čas přijetí)
+	NBIOT_FIFO_Push(dummy_runner, 0);
+
+	APP_DBG("NBIOT: Pravidelny Heartbeat vlozen do fronty.");
+
+	// Znovu spustit za 1 hodinu (3 600 000 ms)
+	HW_TS_Start(NbiotHeartbeatTimerId, (uint32_t)(3600000ULL * 1000ULL / CFG_TS_TICK_VAL));
+}
 
 static void Timer_Backoff_Cb(void) {
 	is_backoff_active = false;
@@ -177,10 +204,31 @@ void NBIOT_Process_Task(void)
 	switch(current_nb_state)
 	{
 		case NB_STATE_SLEEP:
-			// Pokud jsme v penalizaci, nebo zrovna běží 10s odpočet, ignorujeme probuzení
+			// Pokud jsme mrtví a fronta je prázdná, absolutně nic neděláme
+			if (is_nbiot_dead && NBIOT_FIFO_GetCount() == 0) return;
+
+			// 1. BEZPEČNOSTNÍ KONTROLA BATERIE PŘED JAKOUKOLIV AKCÍ
+			if (!is_nbiot_dead) {
+				uint16_t threshold_mv = DEVICE_CONFIG->battery_alert_threshold * 100;
+
+				// NOVÉ: Vyčtení obou hodnot
+				int8_t current_temp;
+				uint16_t current_batt_mv;
+				Get_ADC_Measurements(&current_temp, &current_batt_mv);
+
+				if (threshold_mv > 0 && current_batt_mv < threshold_mv) {
+					APP_DBG("!!! BATERIE KRITICKA (%d mV)! NBIOT odesila umiracek a TRVALE SE VYPINA !!!", current_batt_mv);
+					is_nbiot_dead = true; // Uzamčení modulu
+
+					// Vhodíme do fronty umělý Heartbeat, který se ihned odešle jako poslední zpráva
+					uint8_t dummy_runner[3] = {0xFF, 0xFF, 0xFF};
+					NBIOT_FIFO_Push(dummy_runner, 0);
+				}
+			}
+
+			// 2. BĚŽNÁ KONTROLA FRONTY
 			if (is_backoff_active || is_batch_active) return;
 
-			// Není penalizace a máme data? Zapínáme modul!
 			if (NBIOT_FIFO_GetCount() > 0) {
 				APP_DBG("NBIOT AUTOMAT: Mam data k odeslani, zapinam modul...");
 				NBIOT_PowerOn_Pulse();
@@ -211,21 +259,13 @@ void NBIOT_Process_Task(void)
 			break;
 
 		case NB_STATE_INIT_NETWORK:
-			// Zjistíme, zda modul už našel síť
 			if (strstr((char*)nbiot_rx_buffer, "+CGATT: 1") != NULL) {
-				APP_DBG("NBIOT: >>> SIT NALEZENA! Oteviram UDP Socket... <<<");
+				APP_DBG("NBIOT: >>> SIT NALEZENA! Zjistuji silu signalu... <<<");
 				nbiot_rx_buffer[0] = '\0';
 
-				// Dynamické sestavení AT příkazu s IP a Portem z naší Flash konfigurace!
-				char cmd[128];
-				snprintf(cmd, sizeof(cmd), "AT+QIOPEN=1,0,\"UDP\",\"%s\",%d,0,1",
-								 DEVICE_CONFIG->nbiot_server_ip,
-								 DEVICE_CONFIG->nbiot_server_port);
-				NBIOT_Send_AT(cmd);
-
-				current_nb_state = NB_STATE_OPEN_SOCKET;
-				// Čekáme max 10 vteřin na otevření socketu
-				HW_TS_Start(NbiotPollTimerId, (uint32_t)(10000 * 1000 / CFG_TS_TICK_VAL));
+				// Zeptáme se na sílu signálu POUZE JEDNOU při připojení
+				NBIOT_Send_AT("AT+CSQ");
+				current_nb_state = NB_STATE_GET_CSQ;
 
 			} else if (strstr((char*)nbiot_rx_buffer, "+CGATT: 0") != NULL || nbiot_rx_buffer[0] == '\0') {
 				cgatt_retries++;
@@ -244,43 +284,85 @@ void NBIOT_Process_Task(void)
 			}
 			break;
 
+		case NB_STATE_GET_CSQ:
+			if (strstr((char*)nbiot_rx_buffer, "+CSQ:") != NULL) {
+				// Modul odpoví např. "+CSQ: 18,99"
+				char *ptr = strstr((char*)nbiot_rx_buffer, ": ");
+				if (ptr) {
+					last_csq = atoi(ptr + 2); // Vysekne první číslo (sílu signálu)
+				}
+				nbiot_rx_buffer[0] = '\0';
+				APP_DBG("NBIOT: Sila signalu (CSQ) = %d", last_csq);
+
+				// Nyní otevřeme UDP Socket
+				char cmd[128];
+				snprintf(cmd, sizeof(cmd), "AT+QIOPEN=1,0,\"UDP\",\"%s\",%d,0,1",
+								 DEVICE_CONFIG->nbiot_server_ip, DEVICE_CONFIG->nbiot_server_port);
+				NBIOT_Send_AT(cmd);
+
+				current_nb_state = NB_STATE_OPEN_SOCKET;
+				HW_TS_Start(NbiotPollTimerId, (uint32_t)(10000 * 1000 / CFG_TS_TICK_VAL));
+			}
+			break;
+
 		case NB_STATE_OPEN_SOCKET:
-			// Modul odpoví asynchronně +QIOPEN: 0,0 (Úspěch)
 			if (strstr((char*)nbiot_rx_buffer, "+QIOPEN: 0,0") != NULL) {
 				APP_DBG("NBIOT: Socket Otevren! Pripravuji data k odeslani...");
 				nbiot_rx_buffer[0] = '\0';
 
-				// VYPRÁZDNĚNÍ FRONTY A SESTAVENÍ BINÁRNÍHO PAKETU
 				udp_payload_len = 0;
-				// Nyní čteme SKUTEČNÉ ID KONTROLY z Flash paměti
 				uint16_t my_control_id = DEVICE_CONFIG->stat_device_type;
 
 				while(NBIOT_FIFO_Pop(&active_record)) {
-					// Bezpečnostní pojistka proti přetečení našeho dočasného bufferu
 					if (udp_payload_len + 10 > sizeof(udp_payload)) break;
 
-					// Skládáme náš 10bajtový protokol
-					udp_payload[udp_payload_len++] = 0x01; // MSG_TYPE (0x01 = Závodník)
-					udp_payload[udp_payload_len++] = (my_control_id >> 8) & 0xFF;
-					udp_payload[udp_payload_len++] = my_control_id & 0xFF;
+					// --- ROZLIŠENÍ: ZÁVODNÍK vs. STATUS (HEARTBEAT) ---
+					if (active_record.runner_raw[0] == 0xFF && active_record.runner_raw[1] == 0xFF) {
 
-					// 3 bajty závodníka
-					udp_payload[udp_payload_len++] = active_record.runner_raw[0];
-					udp_payload[udp_payload_len++] = active_record.runner_raw[1];
-					udp_payload[udp_payload_len++] = active_record.runner_raw[2];
+						// --- B) STATUS PAKET (0x02) ---
+						udp_payload[udp_payload_len++] = 0x02; // MSG_TYPE = STATUS
+						udp_payload[udp_payload_len++] = (my_control_id >> 8) & 0xFF;
+						udp_payload[udp_payload_len++] = my_control_id & 0xFF;
 
-					// 4 bajty UNIX času
-					udp_payload[udp_payload_len++] = (active_record.timestamp >> 24) & 0xFF;
-					udp_payload[udp_payload_len++] = (active_record.timestamp >> 16) & 0xFF;
-					udp_payload[udp_payload_len++] = (active_record.timestamp >> 8) & 0xFF;
-					udp_payload[udp_payload_len++] = active_record.timestamp & 0xFF;
+						// NOVÉ: Čteme aktuální data z ADC
+						int8_t temp_c;
+						uint16_t bat_mv;
+						Get_ADC_Measurements(&temp_c, &bat_mv);
+
+						// Zápis baterie
+						udp_payload[udp_payload_len++] = (bat_mv >> 8) & 0xFF;
+						udp_payload[udp_payload_len++] = bat_mv & 0xFF;
+
+						// Zápis signálu
+						udp_payload[udp_payload_len++] = last_csq;
+
+						// Zápis TEPLOTY (Bajt č. 6)
+						udp_payload[udp_payload_len++] = (uint8_t)temp_c;
+
+						// Zbylé 3 bajty dáme na 0x00 (Server si čas doplní sám)
+						udp_payload[udp_payload_len++] = 0x00;
+						udp_payload[udp_payload_len++] = 0x00;
+						udp_payload[udp_payload_len++] = 0x00;
+					} else {
+						// --- A) BĚŽNÝ ZÁVODNÍK (0x01) ---
+						udp_payload[udp_payload_len++] = 0x01; // MSG_TYPE = ZAVODNIK
+						udp_payload[udp_payload_len++] = (my_control_id >> 8) & 0xFF;
+						udp_payload[udp_payload_len++] = my_control_id & 0xFF;
+
+						udp_payload[udp_payload_len++] = active_record.runner_raw[0];
+						udp_payload[udp_payload_len++] = active_record.runner_raw[1];
+						udp_payload[udp_payload_len++] = active_record.runner_raw[2];
+
+						udp_payload[udp_payload_len++] = (active_record.timestamp >> 24) & 0xFF;
+						udp_payload[udp_payload_len++] = (active_record.timestamp >> 16) & 0xFF;
+						udp_payload[udp_payload_len++] = (active_record.timestamp >> 8) & 0xFF;
+						udp_payload[udp_payload_len++] = active_record.timestamp & 0xFF;
+					}
 				}
 
-				// Požádáme modul o odeslání X bajtů
 				char cmd[32];
 				snprintf(cmd, sizeof(cmd), "AT+QISEND=0,%d", udp_payload_len);
 				NBIOT_Send_AT(cmd);
-
 				current_nb_state = NB_STATE_REQ_SEND;
 
 			} else if (strstr((char*)nbiot_rx_buffer, "+QIOPEN: 0,") != NULL) {
@@ -403,6 +485,11 @@ void NBIOT_Hardware_Init(void)
 	HW_TS_Create(CFG_TIM_PROC_ID_ISR, &NbiotBackoffTimerId, hw_ts_SingleShot, Timer_Backoff_Cb);
 	HW_TS_Create(CFG_TIM_PROC_ID_ISR, &NbiotBatchTimerId, hw_ts_SingleShot, Timer_Batch_Cb);
 	HW_TS_Create(CFG_TIM_PROC_ID_ISR, &NbiotPollTimerId, hw_ts_SingleShot, Timer_Poll_Cb);
+
+	// --- NOVÝ ČASOVAČ PRO HEARTBEAT (STATUS) ---
+	HW_TS_Create(CFG_TIM_PROC_ID_ISR, &NbiotHeartbeatTimerId, hw_ts_SingleShot, Timer_Heartbeat_Cb);
+	// Rovnou ho poprvé nastartujeme, ať pošle první stavový paket za 1 hodinu (3 600 000 ms)
+	HW_TS_Start(NbiotHeartbeatTimerId, (uint32_t)(3600000ULL * 1000ULL / CFG_TS_TICK_VAL));
 
 	APP_DBG(">>> NBIOT HARDWARE: Inicializovan (LPUART1 + DMA). Cekam na data.");
 }

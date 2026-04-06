@@ -19,7 +19,7 @@
 #include "app_ffd_mac_802_15_4_process.h"
 
 extern void System_Signalize_Start(uint8_t seconds);
-extern uint16_t Get_Battery_Voltage(void);
+extern void Get_ADC_Measurements(int8_t *out_temp, uint16_t *out_batt_mv);
 
 // --- NAŠE UNIKÁTNÍ UUID (128-bit) ---
 #define COPY_SERVICE_UUID(uuid_struct) { \
@@ -343,7 +343,9 @@ static SVCCTL_EvtAckStatus_t Tunnel_Event_Handler(void *pckt)
 							case CMD_GET_STATUS:
 								if (is_unlocked) {
 									uint8_t status_payload[12]; // Zvětšeno na 12 bajtů
-									uint16_t bat_mv = Get_Battery_Voltage();
+									int8_t temp_c;
+									uint16_t bat_mv;
+									Get_ADC_Measurements(&temp_c, &bat_mv);
 
 									// Vyčtení RTC hodin (POZOR: Musí se číst Time a hned po něm Date!)
 									RTC_TimeTypeDef sTime = {0};
@@ -386,7 +388,9 @@ static SVCCTL_EvtAckStatus_t Tunnel_Event_Handler(void *pckt)
 							case CMD_GET_BATTERY:
 								if (is_unlocked) {
 									uint8_t bat_payload[3];
-									uint16_t bat_mv = Get_Battery_Voltage();
+									int8_t temp_c;
+									uint16_t bat_mv;
+									Get_ADC_Measurements(&temp_c, &bat_mv);
 
 									bat_payload[0] = 0x14; // Odpověď na příkaz
 									bat_payload[1] = (bat_mv >> 8) & 0xFF;
