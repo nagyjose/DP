@@ -197,6 +197,11 @@ static void Config_FactoryReset(void)
 
 	strcpy(def_cfg.team_owner, "Vychozi Oddil");
 
+	// --- VÝCHOZÍ NB-IOT KONFIGURACE ---
+	strcpy(def_cfg.nbiot_apn, "nbiot.vodafone.cz"); // Změň podle své budoucí SIM karty
+	strcpy(def_cfg.nbiot_server_ip, "8.8.8.8");     // Náš testovací Google DNS server
+	def_cfg.nbiot_server_port = 8080;
+
 	// =================================================================
 	// OPRAVA: Výpočet a uložení CRC-32 před zápisem!
 	// =================================================================

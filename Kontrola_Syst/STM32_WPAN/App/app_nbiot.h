@@ -15,5 +15,6 @@ void NBIOT_FIFO_Init(void);
 bool NBIOT_FIFO_Push(uint8_t *runner_raw, uint32_t timestamp);
 bool NBIOT_FIFO_Pop(NBIOT_PunchRecord_t *out_record);
 uint16_t NBIOT_FIFO_GetCount(void);
+void NBIOT_Process_Task(void);
 
 #endif // APP_NBIOT_H

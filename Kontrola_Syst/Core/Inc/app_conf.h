@@ -753,7 +753,7 @@ typedef enum
 #define CONFIG_FLASH_ADDR 0x08020000 // Nultá stránka pro konfiguraci
 
 // =========================================================================
-// STRUKTURA KONTROLY / BEACONU (1592 bytů celkem -> zarovnáno na 8)
+// STRUKTURA KONTROLY / BEACONU (1656 bytů celkem -> zarovnáno na 5)
 // =========================================================================
 typedef struct {
 	// Informace o zařízení (122 bytů)
@@ -781,6 +781,11 @@ typedef struct {
 	int8_t   tx_power;
 	uint8_t  battery_alert_threshold;
 
+	// Síťové informace (66 bytů)
+	char nbiot_apn[32];
+	char nbiot_server_ip[32];
+	uint16_t nbiot_server_port;
+
 	// Informace o vlastníkovi (1450 bytů)
 	char     team_owner[64];
 	char     team_shortcut[4];
@@ -795,7 +800,7 @@ typedef struct {
 	uint16_t team_orisid;
 	char     team_other_info[1024];
 
-	char     padding[7]; // Zarovnání
+	char     padding[5]; // Zarovnání
 
 } __attribute__((packed)) BeaconConfig_t;
 

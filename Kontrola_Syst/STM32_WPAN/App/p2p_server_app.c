@@ -112,7 +112,12 @@ typedef enum {
     PARAM_TEAM_IBAN         = 0x14,
     PARAM_TEAM_BIC          = 0x15,
     PARAM_TEAM_ORISID       = 0x16,
-    PARAM_TEAM_OTHER_INFO   = 0x17
+    PARAM_TEAM_OTHER_INFO   = 0x17,
+
+		// --- NB-IOT Parametry ---
+		PARAM_NBIOT_APN         = 0x18,
+		PARAM_NBIOT_IP          = 0x19,
+		PARAM_NBIOT_PORT        = 0x1A
 } Config_Param_t;
 
 // Zpřístupnění hlavního RTC ovladače z main.c
@@ -622,6 +627,11 @@ static SVCCTL_EvtAckStatus_t Tunnel_Event_Handler(void *pckt)
 									case PARAM_TEAM_EMAIL: if (offset + data_len <= 64) memcpy(&staged_config.team_email[offset], payload, data_len); break;
 									case PARAM_TEAM_OTHER_INFO: if (offset + data_len <= 1024) memcpy(&staged_config.team_other_info[offset], payload, data_len); break;
 									// (Zde si můžeš dopsat zbytek podle potřeby)
+
+									// --- 5. NB-IOT ---
+									case PARAM_NBIOT_APN: if (offset + data_len <= 32) memcpy(&staged_config.nbiot_apn[offset], payload, data_len); break;
+									case PARAM_NBIOT_IP: if (offset + data_len <= 32) memcpy(&staged_config.nbiot_server_ip[offset], payload, data_len); break;
+									case PARAM_NBIOT_PORT: if (data_len >= 2) staged_config.nbiot_server_port = ((uint16_t)payload[0]<<8) | payload[1]; break;
 
 									default:
 										APP_DBG(">>> BLE STAGE: Neznamy parametr (0x%02X)", param_id);

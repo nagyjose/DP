@@ -3,6 +3,7 @@
 #include "app_conf.h"
 #include "dbg_trace.h"
 #include "stm_logging.h"
+#include "utilities_common.h"
 #include <string.h>
 #include "stm32wbxx_hal.h"
 #include <stdio.h>
@@ -40,8 +41,12 @@ typedef enum {
 	NB_STATE_INIT_NETWORK,  // Připojování do sítě (AT+CGATT?)
 	NB_STATE_OPEN_SOCKET,   // Otevírání UDP spojení
 	NB_STATE_SENDING,       // Fyzické odesílání 10 bajtů z fronty
+	NB_STATE_REQ_SEND,      // Čekáme na '>' z modulu
 	NB_STATE_WAITING_ACK    // Čekáme, až nám náš server odpoví bajtem 0x01
 } NBIOT_State_t;
+
+static uint8_t udp_payload[128]; // Buffer pro slepení závodníků
+static uint16_t udp_payload_len = 0;
 
 static NBIOT_State_t current_nb_state = NB_STATE_SLEEP;
 static NBIOT_PunchRecord_t active_record; // Záznam, který se zrovna pokoušíme odeslat
@@ -68,7 +73,43 @@ typedef struct {
 
 static NBIOT_FIFO_t nbiot_fifo;
 
+// =============================================================================
+// ČASOVAČE A STAVOVÉ PROMĚNNÉ PRO BATCHING A BACKOFF
+// =============================================================================
+static uint8_t NbiotBackoffTimerId;
+static uint8_t NbiotBatchTimerId;
+static uint8_t NbiotPollTimerId; // Časovač pro dotazování (AT+CGATT?)
 
+static bool is_backoff_active = false; // Běží 5minutová penalizace?
+static bool is_batch_active = false;   // Běží 10vteřinové okno pro nasbírání dat?
+static uint8_t cgatt_retries = 0;      // Kolikrát jsme se marně ptali na síť
+
+static void Timer_Backoff_Cb(void) {
+	is_backoff_active = false;
+	APP_DBG("NBIOT: Penalizace (5 min) vyprsela. Zkusime to znovu!");
+	UTIL_SEQ_SetTask(1 << CFG_TASK_NBIOT_PROCESS, CFG_SCH_PRIO_0);
+}
+
+static void Timer_Batch_Cb(void) {
+	is_batch_active = false;
+	APP_DBG("NBIOT: Davkovaci okno (10 s) uzavreno. Jdeme vysilat!");
+	UTIL_SEQ_SetTask(1 << CFG_TASK_NBIOT_PROCESS, CFG_SCH_PRIO_0);
+}
+
+static void Timer_Poll_Cb(void) {
+	// Pokud jsme ve fázi čekání na ACK a vypršel timeout (5 vteřin), server neodpověděl!
+	if (current_nb_state == NB_STATE_WAITING_ACK || current_nb_state == NB_STATE_OPEN_SOCKET) {
+		APP_DBG("NBIOT TIMEOUT: Server neodpovedel (nebo selhalo spojeni)! Zacinam BACKOFF (5 min).");
+		NBIOT_Send_AT("AT+QPOWD=1"); // Zavřít krám
+
+		is_backoff_active = true;
+		HW_TS_Start(NbiotBackoffTimerId, (uint32_t)(300000 * 1000 / CFG_TS_TICK_VAL));
+		current_nb_state = NB_STATE_SLEEP;
+	} else {
+		// Běžné probuzení k dalšímu dotazu (např. AT+CGATT?)
+		UTIL_SEQ_SetTask(1 << CFG_TASK_NBIOT_PROCESS, CFG_SCH_PRIO_0);
+	}
+}
 
 void NBIOT_FIFO_Init(void) {
 	nbiot_fifo.head = 0;
@@ -83,22 +124,24 @@ bool NBIOT_FIFO_Push(uint8_t *runner_raw, uint32_t timestamp) {
 	__disable_irq();
 
 	if (nbiot_fifo.count >= NBIOT_FIFO_SIZE) {
-		__set_PRIMASK(primask_bit);
-		APP_DBG(">>> NBIOT FIFO ERROR: Fronta je plna! Zaznam ztracen pro cloud.");
-		return false; // Ztráta dat pro cloud (v lese ale ve Flash zůstanou bezpečně)
+		// PŘETEČENÍ: Fronta je plná! Zahodíme nejstarší záznam posunutím tail
+		nbiot_fifo.tail = (nbiot_fifo.tail + 1) % NBIOT_FIFO_SIZE;
+		// count se nezvyšuje, zůstává na maximu
+		APP_DBG(">>> NBIOT FIFO: Plno! Prepisuji nejstarsi zaznam.");
+	} else {
+		nbiot_fifo.count++;
 	}
 
 	// Zkopírujeme data
 	memcpy(nbiot_fifo.buffer[nbiot_fifo.head].runner_raw, runner_raw, 3);
 	nbiot_fifo.buffer[nbiot_fifo.head].timestamp = timestamp;
 
-	// Posuneme ukazatel
+	// Posuneme ukazatel hlavy
 	nbiot_fifo.head = (nbiot_fifo.head + 1) % NBIOT_FIFO_SIZE;
-	nbiot_fifo.count++;
 
 	__set_PRIMASK(primask_bit);
 
-	// Tímto probudíme hlavní NBIOT Task v Sequenceru (automat pro Quectel)
+	// Probudíme hlavní NBIOT Task
 	UTIL_SEQ_SetTask(1 << CFG_TASK_NBIOT_PROCESS, CFG_SCH_PRIO_0);
 
 	return true;
@@ -127,45 +170,161 @@ uint16_t NBIOT_FIFO_GetCount(void) {
 }
 
 // =============================================================================
-// HLAVNÍ NBIOT TASK (Mozek operace, běží asynchronně v Sequenceru)
+// HLAVNÍ NBIOT TASK (Asynchronní stavový automat)
 // =============================================================================
 void NBIOT_Process_Task(void)
 {
 	switch(current_nb_state)
 	{
 		case NB_STATE_SLEEP:
-			// Jsme uspaní. Podíváme se, jestli něco nepřistálo ve frontě
+			// Pokud jsme v penalizaci, nebo zrovna běží 10s odpočet, ignorujeme probuzení
+			if (is_backoff_active || is_batch_active) return;
+
+			// Není penalizace a máme data? Zapínáme modul!
 			if (NBIOT_FIFO_GetCount() > 0) {
-				APP_DBG("NBIOT AUTOMAT: Nova data ve fronte! Zapinam modul...");
-
-				// Vyndáme nejstarší záznam z fronty a uložíme si ho do pracovní proměnné
-				NBIOT_FIFO_Pop(&active_record);
-
-				NBIOT_PowerOn_Pulse(); // Fyzicky nakopneme Quectel pinu
+				APP_DBG("NBIOT AUTOMAT: Mam data k odeslani, zapinam modul...");
+				NBIOT_PowerOn_Pulse();
 				current_nb_state = NB_STATE_WAKING_UP;
-
-				// Nyní task končí. Procesor jde spát a my čekáme, až nás RX Callback
-				// probudí zprávou "RDY" (Ready) od modulu.
 			}
 			break;
 
 		case NB_STATE_WAKING_UP:
-			// Sem procesor vstoupí ve chvíli, kdy modul něco napsal na sériovou linku
 			if (strstr((char*)nbiot_rx_buffer, "RDY") != NULL || strstr((char*)nbiot_rx_buffer, "OK") != NULL) {
-				APP_DBG("NBIOT AUTOMAT: Modul nabootoval. Zapinam radio (CFUN=1).");
+				APP_DBG("NBIOT: Boot OK. Nastavuji APN a zapinam radio...");
+				nbiot_rx_buffer[0] = '\0';
+
+				// 1. Nastavíme kontext sítě s APN z naší Flash paměti
+				char cmd[64];
+				snprintf(cmd, sizeof(cmd), "AT+QICSGP=1,1,\"%s\"", DEVICE_CONFIG->nbiot_apn);
+				NBIOT_Send_AT(cmd);
+
+				// 2. Zapneme rádiovou část modulu
 				NBIOT_Send_AT("AT+CFUN=1");
+
+				// Příprava na hledání sítě
+				cgatt_retries = 0;
 				current_nb_state = NB_STATE_INIT_NETWORK;
+
+				// Zeptáme se na síť poprvé až za 3 sekundy
+				HW_TS_Start(NbiotPollTimerId, (uint32_t)(3000 * 1000 / CFG_TS_TICK_VAL));
 			}
 			break;
 
 		case NB_STATE_INIT_NETWORK:
-			// Kontrolujeme, zda se připojil k operátorovi (AT+CGATT)
-			// Zde později dopíšeme logiku navazování sítě
-			APP_DBG("NBIOT AUTOMAT: Jsme ve stavu Init Network...");
+			// Zjistíme, zda modul už našel síť
+			if (strstr((char*)nbiot_rx_buffer, "+CGATT: 1") != NULL) {
+				APP_DBG("NBIOT: >>> SIT NALEZENA! Oteviram UDP Socket... <<<");
+				nbiot_rx_buffer[0] = '\0';
+
+				// Dynamické sestavení AT příkazu s IP a Portem z naší Flash konfigurace!
+				char cmd[128];
+				snprintf(cmd, sizeof(cmd), "AT+QIOPEN=1,0,\"UDP\",\"%s\",%d,0,1",
+								 DEVICE_CONFIG->nbiot_server_ip,
+								 DEVICE_CONFIG->nbiot_server_port);
+				NBIOT_Send_AT(cmd);
+
+				current_nb_state = NB_STATE_OPEN_SOCKET;
+				// Čekáme max 10 vteřin na otevření socketu
+				HW_TS_Start(NbiotPollTimerId, (uint32_t)(10000 * 1000 / CFG_TS_TICK_VAL));
+
+			} else if (strstr((char*)nbiot_rx_buffer, "+CGATT: 0") != NULL || nbiot_rx_buffer[0] == '\0') {
+				cgatt_retries++;
+				if (cgatt_retries > 15) { // 15 pokusů = 30 vteřin hledání sítě
+					APP_DBG("NBIOT ERROR: Sit v lese nenalezena! Zacinam BACKOFF (5 min).");
+					NBIOT_Send_AT("AT+QPOWD=1"); // Tvrdě ho vypneme
+
+					is_backoff_active = true;
+					HW_TS_Start(NbiotBackoffTimerId, (uint32_t)(300000 * 1000 / CFG_TS_TICK_VAL));
+					current_nb_state = NB_STATE_SLEEP;
+				} else {
+					nbiot_rx_buffer[0] = '\0';
+					NBIOT_Send_AT("AT+CGATT?");
+					HW_TS_Start(NbiotPollTimerId, (uint32_t)(2000 * 1000 / CFG_TS_TICK_VAL));
+				}
+			}
+			break;
+
+		case NB_STATE_OPEN_SOCKET:
+			// Modul odpoví asynchronně +QIOPEN: 0,0 (Úspěch)
+			if (strstr((char*)nbiot_rx_buffer, "+QIOPEN: 0,0") != NULL) {
+				APP_DBG("NBIOT: Socket Otevren! Pripravuji data k odeslani...");
+				nbiot_rx_buffer[0] = '\0';
+
+				// VYPRÁZDNĚNÍ FRONTY A SESTAVENÍ BINÁRNÍHO PAKETU
+				udp_payload_len = 0;
+				// Nyní čteme SKUTEČNÉ ID KONTROLY z Flash paměti
+				uint16_t my_control_id = DEVICE_CONFIG->stat_device_type;
+
+				while(NBIOT_FIFO_Pop(&active_record)) {
+					// Bezpečnostní pojistka proti přetečení našeho dočasného bufferu
+					if (udp_payload_len + 10 > sizeof(udp_payload)) break;
+
+					// Skládáme náš 10bajtový protokol
+					udp_payload[udp_payload_len++] = 0x01; // MSG_TYPE (0x01 = Závodník)
+					udp_payload[udp_payload_len++] = (my_control_id >> 8) & 0xFF;
+					udp_payload[udp_payload_len++] = my_control_id & 0xFF;
+
+					// 3 bajty závodníka
+					udp_payload[udp_payload_len++] = active_record.runner_raw[0];
+					udp_payload[udp_payload_len++] = active_record.runner_raw[1];
+					udp_payload[udp_payload_len++] = active_record.runner_raw[2];
+
+					// 4 bajty UNIX času
+					udp_payload[udp_payload_len++] = (active_record.timestamp >> 24) & 0xFF;
+					udp_payload[udp_payload_len++] = (active_record.timestamp >> 16) & 0xFF;
+					udp_payload[udp_payload_len++] = (active_record.timestamp >> 8) & 0xFF;
+					udp_payload[udp_payload_len++] = active_record.timestamp & 0xFF;
+				}
+
+				// Požádáme modul o odeslání X bajtů
+				char cmd[32];
+				snprintf(cmd, sizeof(cmd), "AT+QISEND=0,%d", udp_payload_len);
+				NBIOT_Send_AT(cmd);
+
+				current_nb_state = NB_STATE_REQ_SEND;
+
+			} else if (strstr((char*)nbiot_rx_buffer, "+QIOPEN: 0,") != NULL) {
+				// Chyba otevírání (např. +QIOPEN: 0,561)
+				APP_DBG("NBIOT ERROR: Nelze otevrit socket! Uspavam modul.");
+				NBIOT_Send_AT("AT+QPOWD=1");
+				current_nb_state = NB_STATE_SLEEP; // Zkusí to při dalším závodníkovi znovu
+			}
+			break;
+
+		case NB_STATE_REQ_SEND:
+			// Modul pošle znak '>', čímž říká: "Nasyp do mě ty surové bajty"
+			if (strchr((char*)nbiot_rx_buffer, '>') != NULL) {
+				APP_DBG("NBIOT: Odesilam %d bajtu do eteru...", udp_payload_len);
+				nbiot_rx_buffer[0] = '\0';
+
+				// Odeslání samotných binárních dat (bez \r\n na konci!)
+				HAL_UART_Transmit(&hlpuart1, udp_payload, udp_payload_len, 1000);
+
+				current_nb_state = NB_STATE_WAITING_ACK;
+				// Server má 5 vteřin na to, aby poslal potvrzení
+				HW_TS_Start(NbiotPollTimerId, (uint32_t)(5000 * 1000 / CFG_TS_TICK_VAL));
+			}
+			break;
+
+		case NB_STATE_WAITING_ACK:
+			// TADY SE ROZHODUJE: Přijde nám odpověď ze serveru?
+			if (strstr((char*)nbiot_rx_buffer, "+QIURC: \"recv\"") != NULL) {
+				// V reálu bychom zde ještě četli samotná data pres AT+QIRD,
+				// ale samotný fakt, že přišlo "recv", znamená, že s námi server mluví!
+				APP_DBG("NBIOT: >>> ACK OD SERVERU PRIJATO! Data bezpecne v cloudu. <<<");
+				nbiot_rx_buffer[0] = '\0';
+
+				APP_DBG("NBIOT: Uspavam modul a spoustim BATCH (10s)");
+				NBIOT_Send_AT("AT+QPOWD=1");
+
+				is_batch_active = true;
+				HW_TS_Start(NbiotBatchTimerId, (uint32_t)(10000 * 1000 / CFG_TS_TICK_VAL));
+				current_nb_state = NB_STATE_SLEEP;
+			}
 			break;
 
 		default:
-				break;
+			break;
 	}
 }
 
@@ -239,6 +398,11 @@ void NBIOT_Hardware_Init(void)
 	HAL_UARTEx_ReceiveToIdle_DMA(&hlpuart1, nbiot_rx_buffer, NBIOT_RX_BUFFER_SIZE);
 
 	UTIL_SEQ_RegTask(1 << CFG_TASK_NBIOT_PROCESS, UTIL_SEQ_RFU, NBIOT_Process_Task);
+
+	// Založení časovačů pro logiku sítě
+	HW_TS_Create(CFG_TIM_PROC_ID_ISR, &NbiotBackoffTimerId, hw_ts_SingleShot, Timer_Backoff_Cb);
+	HW_TS_Create(CFG_TIM_PROC_ID_ISR, &NbiotBatchTimerId, hw_ts_SingleShot, Timer_Batch_Cb);
+	HW_TS_Create(CFG_TIM_PROC_ID_ISR, &NbiotPollTimerId, hw_ts_SingleShot, Timer_Poll_Cb);
 
 	APP_DBG(">>> NBIOT HARDWARE: Inicializovan (LPUART1 + DMA). Cekam na data.");
 }
