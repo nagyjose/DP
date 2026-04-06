@@ -624,3 +624,23 @@ void LPUART1_IRQHandler(void) {
 	HAL_UART_IRQHandler(&hlpuart1);
 }
 
+// =============================================================================
+// NÁSILNÉ VYPNUTÍ MODULU (Voláno při přechodu do BLE nebo Storage)
+// =============================================================================
+void NBIOT_Force_Sleep(void) {
+	APP_DBG(">>> NBIOT: Vynucene vypnuti modulu (System jde spat) <<<");
+
+	// Pro jistotu pošleme slušný povel k vypnutí (pokud UART zrovna žije)
+	NBIOT_Send_AT("AT+QPOWD=1");
+
+	// Zastavíme všechny NB-IoT časovače
+	HW_TS_Stop(NbiotBatchTimerId);
+	HW_TS_Stop(NbiotBackoffTimerId);
+	HW_TS_Stop(NbiotPollTimerId);
+	HW_TS_Stop(NbiotHeartbeatTimerId);
+
+	// Natvrdo přejdeme do stavu SLEEP
+	current_nb_state = NB_STATE_SLEEP;
+	is_nbiot_dead = true; // Zabráníme dalšímu probuzení, dokud se systém neresetuje
+}
+

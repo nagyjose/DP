@@ -20,6 +20,7 @@
 
 extern void System_Signalize_Start(uint8_t seconds);
 extern void Get_ADC_Measurements(int8_t *out_temp, uint16_t *out_batt_mv);
+extern void NBIOT_Force_Sleep(void);
 
 // --- PŘIDÁNO: Dopředná deklarace naší nové funkce ---
 void System_Send_ACK(uint8_t *payload, uint8_t length, uint8_t source);
@@ -262,6 +263,8 @@ void BLE_Chunker_Task(void)
 static void System_Enter_Storage_Mode(void)
 {
 	APP_DBG(">>> SYSTEM: Prechod do hlubokeho spanku (STORAGE) <<<");
+
+	NBIOT_Force_Sleep();
 
 	// 1. Zastavíme všechny procesy a rádio
 	// (V tuto chvíli běží BLE, takže ho korektně vypneme)
