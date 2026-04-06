@@ -274,40 +274,56 @@ void APP_MAC_ReceiveData(void)
 		if (device_type == 0x00)
 		{
 			// =================================================================
+			// ANTI-SPAM FILTR (Ochrana proti Burst přenosu od Závodníka)
+			// =================================================================
+			static uint32_t last_saved_id = 0xFFFFFFFF;
+			static uint32_t last_saved_tick = 0;
+
+			// Pokud je to ten samý závodník a neuběhla ani 1 vteřina (1000 ms), zahoď to!
+			if (received_id_or_hash == last_saved_id && (HAL_GetTick() - last_saved_tick < 1000)) {
+				APP_DBG(">>> KONTROLA ANTI-SPAM: Ignoruji burst duplikat od ID: %lu", received_id_or_hash);
+				return; // Ukončíme zpracování tohoto paketu
+			}
+
+			// Není to spam, uložíme si jeho ID a čas pro příště
+			last_saved_id = received_id_or_hash;
+			last_saved_tick = HAL_GetTick();
+
+			// =================================================================
 			// A) STANDARDNÍ ZÁVODNÍK -> ZÁPIS DO PAMĚTI
 			// =================================================================
 			APP_DBG(">>> ZAVODNIK ORAZIL! ID: %lu", received_id_or_hash);
 
-		// Získání aktuálního času pro záznam
-		RTC_TimeTypeDef sTime = {0};
-		RTC_DateTypeDef sDate = {0};
-		HAL_RTC_GetTime(&hrtc, &sTime, RTC_FORMAT_BIN);
-		HAL_RTC_GetDate(&hrtc, &sDate, RTC_FORMAT_BIN);
+			// Získání aktuálního času pro záznam
+			RTC_TimeTypeDef sTime = {0};
+			RTC_DateTypeDef sDate = {0};
+			HAL_RTC_GetTime(&hrtc, &sTime, RTC_FORMAT_BIN);
+			HAL_RTC_GetDate(&hrtc, &sDate, RTC_FORMAT_BIN);
 
-		uint32_t ssr = RTC->SSR;
-		uint32_t prer_s = RTC->PRER & RTC_PRER_PREDIV_S;
-		uint32_t prer_a = (RTC->PRER & RTC_PRER_PREDIV_A) >> 16;
-		if (prer_s == 0) prer_s = 255;
-		if (prer_a == 0) prer_a = 127;
+			uint32_t ssr = RTC->SSR;
+			uint32_t prer_s = RTC->PRER & RTC_PRER_PREDIV_S;
+			uint32_t prer_a = (RTC->PRER & RTC_PRER_PREDIV_A) >> 16;
+			if (prer_s == 0) prer_s = 255;
+			if (prer_a == 0) prer_a = 127;
 
-		uint32_t ssr_freq = 32768 / (prer_a + 1);
-		uint32_t seconds_per_tick = (prer_s + 1) / ssr_freq;
-		if (seconds_per_tick == 0) seconds_per_tick = 1;
+			uint32_t ssr_freq = 32768 / (prer_a + 1);
+			uint32_t seconds_per_tick = (prer_s + 1) / ssr_freq;
+			if (seconds_per_tick == 0) seconds_per_tick = 1;
 
-		uint32_t ms_within_tick = ((prer_s - ssr) * 1000) / ssr_freq;
-		uint8_t sub_sec = (ms_within_tick % 1000) / 100; // Desetiny vteřiny (0-9)
+			uint32_t ms_within_tick = ((prer_s - ssr) * 1000) / ssr_freq;
+			uint8_t sub_sec = (ms_within_tick % 1000) / 100; // Desetiny vteřiny (0-9)
 
-		uint32_t cal_seconds = Get_Calendar_Seconds_Since_2000(&sDate, &sTime);
-		uint32_t real_seconds_since_2000 = (cal_seconds * seconds_per_tick) + (ms_within_tick / 1000);
-		uint32_t unix_time = 946684800 + real_seconds_since_2000;
+			uint32_t cal_seconds = Get_Calendar_Seconds_Since_2000(&sDate, &sTime);
+			uint32_t real_seconds_since_2000 = (cal_seconds * seconds_per_tick) + (ms_within_tick / 1000);
+			uint32_t unix_time = 946684800 + real_seconds_since_2000;
 
-		// Zápis do kruhového bufferu s Erase-Ahead logikou
-		Logger_SavePunch_Kontrola(payload, sub_sec, unix_time);
+			// Zápis do kruhového bufferu s Erase-Ahead logikou
+			Logger_SavePunch_Kontrola(payload, sub_sec, unix_time);
 
-		// =================================================================
-		// ASYNCHRONNÍ PÍPNUTÍ A BLIKNUTÍ (Čisté využití hotového API)
-		// =================================================================
-		System_Signalize_Start(4); // Pípá a bliká po dobu 1 vteřiny
+			// =================================================================
+			// ASYNCHRONNÍ PÍPNUTÍ A BLIKNUTÍ (Čisté využití hotového API)
+			// =================================================================
+			System_Signalize_Start(4); // Pípá a bliká po dobu 1 vteřiny
 
 		}
 		else if (device_type == 0x01)
