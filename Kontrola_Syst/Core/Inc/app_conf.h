@@ -577,6 +577,7 @@ typedef enum
 	CFG_TASK_BUZZER,           /* Náš task pro blikání a pípání */
 	CFG_TASK_MAC_SNIFF,      // NOVÉ: Probuzení rádia
 	CFG_TASK_MAC_SLEEP,      // NOVÉ: Uspání rádia
+	CFG_TASK_EXECUTE_DISCONNECT, // Provedení odpojení BLE
 
   CFG_LAST_TASK_ID_WITH_HCICMD, /**< Shall be LAST in the list */
 } CFG_Task_Id_With_HCI_Cmd_t;

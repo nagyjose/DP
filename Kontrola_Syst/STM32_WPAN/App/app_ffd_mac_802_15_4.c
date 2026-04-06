@@ -378,7 +378,9 @@ void APP_MAC_SendBeaconTask(void)
 	// 2. ZAMKNUTÍ SEMAFORU A ODESLÁNÍ
 	can_send_beacon = false;
 	// Ochrana proti přerušení řetězce
-	MAC_MCPSDataReq(&dataReq);
+	if (MAC_MCPSDataReq(&dataReq) != MAC_SUCCESS) {
+	    can_send_beacon = true; // Fronta selhala ihned, odemkneme
+	}
 
 	BSP_LED_Toggle(LED_GREEN);
 }

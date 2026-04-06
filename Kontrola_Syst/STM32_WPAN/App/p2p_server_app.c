@@ -37,6 +37,15 @@ static uint16_t TxCharHdle;
 static uint16_t current_conn_handle = 0xFFFF; // Handle aktuálního spojení
 static bool sleep_pending = false;            // Čekáme na slušné odpojení?
 
+static uint8_t pending_disconnect_action = 0; // 0 = Nic, 1 = SLEEP, 2 = POWER_OFF
+static uint8_t DisconnectTimerId;
+
+// Callback časovače pouze probudí finální Task
+static void DisconnectTimer_Callback(void) {
+    UTIL_SEQ_SetTask(1 << CFG_TASK_EXECUTE_DISCONNECT, CFG_SCH_PRIO_0);
+}
+void Execute_Disconnect_Task(void); // <--- Přidej tento řádek nahoru k definicím
+
 // =============================================================================
 // SEZNAM HLAVNÍCH BLE PŘÍKAZŮ
 // =============================================================================
@@ -273,6 +282,11 @@ static void System_Enter_Storage_Mode(void)
 // -----------------------------------------------------------------------------
 static SVCCTL_EvtAckStatus_t Tunnel_Event_Handler(void *pckt)
 {
+	// LOCKDOWN: Pokud se zrovna vypínáme, ignorujeme všechny nové požadavky od mobilu!
+	if (pending_disconnect_action != 0) {
+		return SVCCTL_EvtNotAck;
+	}
+
 	hci_uart_pckt *hci_pckt = (hci_uart_pckt *)pckt;
 	hci_event_pckt *event_pckt = (hci_event_pckt*)hci_pckt->data;
 
@@ -470,44 +484,33 @@ static SVCCTL_EvtAckStatus_t Tunnel_Event_Handler(void *pckt)
 							}
 							break;
 
-						case CMD_SLEEP: // CMD_SLEEP (Návrat z BLE do MAC)
+						case CMD_SLEEP:
 							APP_DBG(">>> BLE CMD: SLEEP (0x51) - Zacinam slusne odpojovani...");
-
-							// Odpovíme mobilu, že povel přijímáme
 							uint8_t ack_sleep[4] = {0x51, 0x01, 0x00, 0x00};
 							BLE_Tunnel_Send(ack_sleep, 4);
 
-							sleep_pending = true; // Nastavíme vlajku, že chceme jít spát
+							sleep_pending = true;
+							pending_disconnect_action = 1; // 1 = Zámek pro SLEEP
 
-							// !!! OPRAVA GATT 133: Dáme koprocesoru 100 ms na fyzické odeslání !!!
-							HAL_Delay(100);
-
-							if (current_conn_handle != 0xFFFF) {
-								// 0x13 = Remote User Terminated Connection (Slusne odpojeni)
-								aci_gap_terminate(current_conn_handle, 0x13);
-							} else {
-								// Pojistka: Kdybychom handle neměli, přepneme rovnou
-								UTIL_SEQ_SetTask(1U << CFG_TASK_INIT_SWITCH_PROTOCOL, CFG_SCH_PRIO_0);
-							}
+							// Necháme rádio dýchat a za 100 ms spustíme finální odpojení
+							HW_TS_Start(DisconnectTimerId, (uint32_t)(100 * 1000 / CFG_TS_TICK_VAL));
 							break;
 
-						case CMD_POWER_OFF: // CMD_POWER_OFF (0x52)
+						case CMD_POWER_OFF:
 							if (!is_unlocked) {
-								uint8_t err_lock[4] = {cmd, 0xAA, 0x00, 0x00}; BLE_Tunnel_Send(err_lock, 4);
+								uint8_t err_lock[4] = {cmd, 0xAA, 0x00, 0x00};
+								BLE_Tunnel_Send(err_lock, 4);
 								break;
 							}
 
 							APP_DBG(">>> BLE CMD: POWER OFF (0x52) - Vypinam kontrolu...");
-
-							// Odpovíme mobilu, že povel přijímáme
 							uint8_t ack_off[4] = {0x52, 0x01, 0x00, 0x00};
 							BLE_Tunnel_Send(ack_off, 4);
 
-							// Necháme balíček 100 ms odletět vzduchem k mobilu
-							HAL_Delay(100);
+							pending_disconnect_action = 2; // 2 = Zámek pro POWER_OFF
 
-							// Usmrtíme procesor do STORAGE módu
-							System_Enter_Storage_Mode();
+							// Za 100 ms zabijeme procesor
+							HW_TS_Start(DisconnectTimerId, (uint32_t)(100 * 1000 / CFG_TS_TICK_VAL));
 							break;
 
 						// =====================================================
@@ -740,6 +743,10 @@ void P2PS_APP_Init(void) {
 										CHAR_PROP_NOTIFY,
 										ATTR_PERMISSION_NONE, GATT_DONT_NOTIFY_EVENTS, 10, 1, &TxCharHdle);
 
+	// 100 ms časovač pro správné odpojení BLE
+	HW_TS_Create(CFG_TIM_PROC_ID_ISR, &DisconnectTimerId, hw_ts_SingleShot, DisconnectTimer_Callback);
+	UTIL_SEQ_RegTask(1 << CFG_TASK_EXECUTE_DISCONNECT, UTIL_SEQ_RFU, Execute_Disconnect_Task);
+
 	APP_DBG(">>> BLE TUNEL: Inicializovano a pripraveno!");
 }
 
@@ -783,4 +790,18 @@ void P2PS_APP_Notification(P2PS_APP_ConnHandle_Not_evt_t *pNotification)
 	}
 }
 
+// Odpojení BLE
+void Execute_Disconnect_Task(void)
+{
+    if (pending_disconnect_action == 1) { // CMD_SLEEP
+        if (current_conn_handle != 0xFFFF) {
+            aci_gap_terminate(current_conn_handle, 0x13);
+        } else {
+            UTIL_SEQ_SetTask(1U << CFG_TASK_INIT_SWITCH_PROTOCOL, CFG_SCH_PRIO_0);
+        }
+    }
+    else if (pending_disconnect_action == 2) { // CMD_POWER_OFF
+        System_Enter_Storage_Mode();
+    }
+}
 
