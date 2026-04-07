@@ -572,7 +572,12 @@ void HAL_GPIO_EXTI_Callback( uint16_t GPIO_Pin )
   switch (GPIO_Pin)
   {
   case BUTTON_SW1_PIN:
-		//APP_DBG("BUTTON 1 PUSHED ! : NO ACTION MAPPED ON SW1");
+#if (ENABLE_HARDWARE_TEST_MODE == 1)
+		extern void APP_MAC_Test_Button_Action(void);
+		APP_MAC_Test_Button_Action();
+#else
+		APP_DBG("BUTTON 1 PUSHED ! : NO ACTION MAPPED ON SW1");
+#endif
 		break;
 
   case BUTTON_SW2_PIN:

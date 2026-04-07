@@ -34,7 +34,6 @@ static uint16_t TxCharHdle;
 static uint16_t current_conn_handle = 0xFFFF; // Handle aktuálního spojení
 static bool sleep_pending = false;            // Čekáme na slušné odpojení?
 
-
 // --- DOPŘEDNÁ DEKLARACE NOVÝCH FUNKCÍ ---
 void System_Send_ACK(uint8_t *payload, uint8_t length, uint8_t source);
 void System_Execute_Command(uint8_t *payload_data, uint8_t payload_len, uint8_t source);

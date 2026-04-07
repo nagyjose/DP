@@ -20,6 +20,22 @@ static uint8_t     rx_payload_safe[128]; // PŘIDÁNO: Naše vlastní bezpečné
 extern uint8_t BuzzerTimerId; // Náš nový časovač pro blikání
 volatile uint8_t blink_counter = 0; // Kolikrát má ještě bliknout
 
+// =============================================================================
+// TESTOVACÍ MÓD (MOCKING)
+// =============================================================================
+#if (ENABLE_HARDWARE_TEST_MODE == 1)
+volatile uint8_t debug_mock_mode = 0; // 0 = Běžný Závodník, 1 = Konfigurační čip
+
+void APP_MAC_Test_Button_Action(void) {
+	debug_mock_mode = !debug_mock_mode;
+	if (debug_mock_mode) {
+		APP_DBG(">>> TEST MOCK: Nyni se tvarim jako KONFIGURATOR (Odemkne Kontrolu) <<<");
+	} else {
+		APP_DBG(">>> TEST MOCK: Nyni se tvarim jako normalni ZAVODNIK <<<");
+	}
+}
+#endif
+
 // --- NASTAVENÍ FILTRU A ZÁVODNÍKA ---
 // Smazali jsme #define pro WINDOW_SIZE, HITS_REQUIRED a COOLDOWN_MS!
 // Budeme je tahat dynamicky z DEVICE_CONFIG.
@@ -320,6 +336,15 @@ static void Send_Punch_Response(void)
 	// Získáme data aktuálního Závodníka PŘÍMO z Konfigurační nulté stránky
 	uint8_t  my_type = DEVICE_CONFIG->comp_device_type;
 	uint32_t my_id   = DEVICE_CONFIG->comp_device_id;
+
+	// --- PŘIDÁNO: TESTOVACÍ PODVRŽENÍ DAT ---
+#if (ENABLE_HARDWARE_TEST_MODE == 1)
+	if (debug_mock_mode == 1) {
+		my_type = 0x01; // Typ = Konfigurátor
+		// Místo standardního ID pošleme náš tajný HASH (PIN), kterým se odemyká Kontrola
+		my_id = DEVICE_CONFIG->comp_device_hash;
+	}
+#endif
 
 	// Byte 0: 2 bity TYP (posunuto o 6) | 6 nejvyšších bitů z ID
 	payload[0] = (uint8_t)((my_type << 6) | ((my_id >> 16) & 0x3F));
