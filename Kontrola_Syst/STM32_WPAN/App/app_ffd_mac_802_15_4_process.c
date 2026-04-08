@@ -18,7 +18,7 @@
 #include "flash_logger.h"
 #include "app_nbiot.h"
 
-volatile BeaconState_t current_state = STATE_IDLE_MAC;
+volatile BeaconState_t current_state = STATE_ACTIVE_MAC;
 
 /* Global variables ----------------------------------------------------------*/
 int volatile FrameOnGoing = FALSE;
@@ -441,7 +441,7 @@ void APP_MAC_Magnet_Action(void)
 		// ---------------------------------------------------------
 		// 1. ZCELA USMRTIT BLE STACK (Uvolní hardwarový arbitr antény)
 		// ---------------------------------------------------------
-		APP_BLE_Stop();
+		//APP_BLE_Stop();
 
 		// ---------------------------------------------------------
 		// 2. PROBUZENÍ PŘIJÍMAČE MAC VRSTVY (Aby Kontrola slyšela Závodníka)

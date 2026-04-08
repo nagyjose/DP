@@ -827,13 +827,19 @@ void P2PS_APP_Notification(P2PS_APP_ConnHandle_Not_evt_t *pNotification)
 			is_unlocked = false;
 			memset(&staged_config, 0, sizeof(BeaconConfig_t));
 
+			extern volatile BeaconState_t current_state; // Přístup ke globální proměnné
+
 			if (sleep_pending) {
-				// Pokud mobil inicioval spánek (nebo jsme ho vykopli my přes CMD_SLEEP)
+				// Mobil poslal CMD_SLEEP
 				sleep_pending = false;
-				APP_DBG(">>> BLE TUNEL: Provedeno slusne odpojeni. Prepinam na MAC!");
+				APP_DBG(">>> BLE TUNEL: CMD_SLEEP. Prepinam na MAC do IDLE!");
+				current_state = STATE_IDLE_MAC; // <--- Uložení stavu pro MAC
 				UTIL_SEQ_SetTask(1U << CFG_TASK_INIT_SWITCH_PROTOCOL, CFG_SCH_PRIO_0);
 			} else {
-				APP_DBG(">>> BLE SECURITY: Spojeni ztraceno -> AUTO-LOCK aktivovan!");
+				// Běžné odpojení (ztráta signálu, uložení konfigurace atd.)
+				APP_DBG(">>> BLE SECURITY: Spojeni ztraceno -> Prepinam na MAC do ACTIVE!");
+				current_state = STATE_ACTIVE_MAC; // <--- Uložení stavu pro MAC
+				UTIL_SEQ_SetTask(1U << CFG_TASK_INIT_SWITCH_PROTOCOL, CFG_SCH_PRIO_0);
 			}
 			break;
 

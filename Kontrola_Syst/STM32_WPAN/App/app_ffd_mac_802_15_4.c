@@ -255,7 +255,7 @@ void APP_FFD_MAC_802_15_4_SetupTask(void)
   BSP_LED_On(LED_BLUE);
 
   // Vzdy nabihat z BLE do usporneho rezimu (1x za sekundu)
-	current_state = STATE_ACTIVE_MAC;
+	//current_state = STATE_ACTIVE_MAC;
 
   // ZDE POPRVE ODPALIME CASOVAC (Zacne vysilat pakety)
   APP_MAC_RestartBeaconTimer();
