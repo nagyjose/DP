@@ -267,7 +267,7 @@ void Get_ADC_Measurements(int8_t *out_temp, uint16_t *out_batt_mv)
 				if (HAL_ADC_PollForConversion(&hadc1, 100) == HAL_OK) {
 					uint32_t raw_val = HAL_ADC_GetValue(&hadc1);
 					int8_t temp_raw = (int8_t)__LL_ADC_CALC_TEMPERATURE(3300, raw_val, LL_ADC_RESOLUTION_12B);
-					*out_temp = temp_raw - 2; // Aplikace kalibračního offsetu
+					*out_temp = temp_raw - 3; // Aplikace kalibračního offsetu
 				}
 				HAL_ADC_Stop(&hadc1);
 			}
@@ -457,6 +457,15 @@ void APP_MAC_ReceiveData(void)
 		for (int i = 0; i < window_size; i++) {
 			if (history_mask & (1 << i)) valid_hits++;
 		}
+
+		// ---> PŘIDAT TENTO BLOK PRO PŘEDBĚŽNÉ PROBUZENÍ <---
+		// Pokud jsme v IDLE, slyšíme CLEAR kontrolu a paket má dobré RSSI (history_mask & 1)
+		if (control_id == CLEAR_CONTROL_ID && current_race_state == STATE_IDLE && (history_mask & 1)) {
+			current_race_state = STATE_RACING; // Změna stavu zablokuje SleepTask!
+			APP_DBG(">>> RACE STATE: PREDBEZNE PROBUZENI! (Zachycen 1. paket CLEAR) <<<");
+			// Rádio zůstává ZAPNUTÉ. Nyní bleskově dosbíráme zbylé pakety pro oražení.
+		}
+		// ---------------------------------------------------
 
 		// =====================================================================
 		// 5. VYHODNOCENÍ ÚSPĚŠNÉHO ORAŽENÍ
