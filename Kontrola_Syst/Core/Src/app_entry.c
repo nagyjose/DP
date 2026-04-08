@@ -192,7 +192,7 @@ static void Process_InitiateSwitchProtocol(void)
     APP_FFD_MAC_802_15_4_Stop();
 
     /* start a timer */
-    //HW_TS_Create(CFG_TIM_WAIT_BEFORE_SWITCH, &TS_ID1, hw_ts_SingleShot, ScheduleProcessSwitchProtocol);
+    HW_TS_Create(CFG_TIM_WAIT_BEFORE_SWITCH, &TS_ID1, hw_ts_SingleShot, ScheduleProcessSwitchProtocol);
 
     HW_TS_Start(TS_ID1, SWITCH_TMO);
     APP_DBG("SWITCH PROTOCOL TO BLE");

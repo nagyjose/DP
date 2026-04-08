@@ -35,6 +35,9 @@ volatile uint8_t blink_counter = 0; // Kolikrát má ještě bliknout
 
 extern void APP_BLE_Stop(void);
 
+// Musíme ten payload bezpečně vykopírovat ven dřív, než uvolníme koprocesor.
+static uint8_t rx_payload_safe_kontrola[128];
+
 // =============================================================================
 // HARDWARE DRIVER: BZUČÁK (PWM) A LED
 // =============================================================================
@@ -301,6 +304,7 @@ void APP_MAC_ReceiveData(void)
 			// Pokud je to ten samý závodník a neuběhla ani 1 vteřina (1000 ms), zahoď to!
 			if (received_id_or_hash == last_saved_id && (HAL_GetTick() - last_saved_tick < 1000)) {
 				APP_DBG(">>> KONTROLA ANTI-SPAM: Ignoruji burst duplikat od ID: %lu", received_id_or_hash);
+				FrameOnGoing = FALSE;
 				return; // Ukončíme zpracování tohoto paketu
 			}
 
@@ -392,6 +396,12 @@ MAC_Status_t APP_MAC_mcpsDataIndCb( const  MAC_dataInd_t * pDataInd )
 	{
 		FrameOnGoing = TRUE;
 		memcpy(&g_DataInd, pDataInd, sizeof(MAC_dataInd_t));
+
+		// --- KRITICKÁ OPRAVA: BEZPEČNÁ ZÁLOHA PAYLOADU ---
+		memcpy(rx_payload_safe_kontrola, pDataInd->msduPtr, pDataInd->msdu_length);
+		g_DataInd.msduPtr = rx_payload_safe_kontrola; // Přesměrování ukazatele
+		// -------------------------------------------------
+
 		UTIL_SEQ_SetTask(1 << CFG_TASK_RECEIVE_DATA, CFG_SCH_PRIO_0);
 	}
 	return MAC_SUCCESS;

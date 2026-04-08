@@ -246,7 +246,7 @@ void APP_FFD_MAC_802_15_4_SetupTask(void)
 	// !!! USPAT ANTÉNU - Necháme prostor pro nabootování BLE Tunelu !!!
 	memset(&SetReq,0x00,sizeof(MAC_setReq_t));
 	SetReq.PIB_attribute = g_MAC_RX_ON_WHEN_IDLE_c;
-	PIB_Value = g_FALSE;
+	PIB_Value = g_TRUE;
 	SetReq.PIB_attribute_valuePtr = &PIB_Value;
 	MAC_MLMESetReq( &SetReq );
 	UTIL_SEQ_WaitEvt( 1U << CFG_EVT_SET_CNF );

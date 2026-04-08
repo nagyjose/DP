@@ -362,106 +362,106 @@ void System_Execute_Command(uint8_t *payload_data, uint8_t payload_len, uint8_t 
 			UTIL_SEQ_SetTask(1 << CFG_TASK_BLE_CHUNKER, CFG_SCH_PRIO_0);
 			break;
 
-			// =====================================================
-			// RYCHLÝ STATUS KONTROLY (0x11)
-			// =====================================================
-			case CMD_GET_STATUS:
-				if (is_unlocked) {
-					uint8_t status_payload[12]; // Zvětšeno na 12 bajtů
-					int8_t temp_c;
-					uint16_t bat_mv;
-					Get_ADC_Measurements(&temp_c, &bat_mv);
+		// =====================================================
+		// RYCHLÝ STATUS KONTROLY (0x11)
+		// =====================================================
+		case CMD_GET_STATUS:
+			if (is_unlocked) {
+				uint8_t status_payload[12]; // Zvětšeno na 12 bajtů
+				int8_t temp_c;
+				uint16_t bat_mv;
+				Get_ADC_Measurements(&temp_c, &bat_mv);
 
-					// Vyčtení RTC hodin (POZOR: Musí se číst Time a hned po něm Date!)
-					RTC_TimeTypeDef sTime = {0};
-					RTC_DateTypeDef sDate = {0};
-					HAL_RTC_GetTime(&hrtc, &sTime, RTC_FORMAT_BIN);
-					HAL_RTC_GetDate(&hrtc, &sDate, RTC_FORMAT_BIN);
-					uint32_t unix_now = Convert_RTCToUnix(&sDate, &sTime);
+				// Vyčtení RTC hodin (POZOR: Musí se číst Time a hned po něm Date!)
+				RTC_TimeTypeDef sTime = {0};
+				RTC_DateTypeDef sDate = {0};
+				HAL_RTC_GetTime(&hrtc, &sTime, RTC_FORMAT_BIN);
+				HAL_RTC_GetDate(&hrtc, &sDate, RTC_FORMAT_BIN);
+				uint32_t unix_now = Convert_RTCToUnix(&sDate, &sTime);
 
-					status_payload[0] = 0x11; // Odpověď na příkaz
+				status_payload[0] = 0x11; // Odpověď na příkaz
 
-					// 1. ID Kontroly (16 bitů)
-					status_payload[1] = (DEVICE_CONFIG->stat_device_type >> 8) & 0xFF;
-					status_payload[2] = DEVICE_CONFIG->stat_device_type & 0xFF;
+				// 1. ID Kontroly (16 bitů)
+				status_payload[1] = (DEVICE_CONFIG->stat_device_type >> 8) & 0xFF;
+				status_payload[2] = DEVICE_CONFIG->stat_device_type & 0xFF;
 
-					// 2. Vysílací parametry (Perioda, Výkon, Bzučák)
-					status_payload[3] = DEVICE_CONFIG->beacon_period_ms;
-					status_payload[4] = DEVICE_CONFIG->tx_power;
-					status_payload[5] = DEVICE_CONFIG->buzzer_onoff;
+				// 2. Vysílací parametry (Perioda, Výkon, Bzučák)
+				status_payload[3] = DEVICE_CONFIG->beacon_period_ms;
+				status_payload[4] = DEVICE_CONFIG->tx_power;
+				status_payload[5] = DEVICE_CONFIG->buzzer_onoff;
 
-					// 3. Napětí baterie (16 bitů v milivoltech)
-					status_payload[6] = (bat_mv >> 8) & 0xFF;
-					status_payload[7] = bat_mv & 0xFF;
+				// 3. Napětí baterie (16 bitů v milivoltech)
+				status_payload[6] = (bat_mv >> 8) & 0xFF;
+				status_payload[7] = bat_mv & 0xFF;
 
-					// 4. PŘIDÁNO: Aktuální UNIX čas v Kontrole (32 bitů)
-					status_payload[8] = (unix_now >> 24) & 0xFF;
-					status_payload[9] = (unix_now >> 16) & 0xFF;
-					status_payload[10] = (unix_now >> 8) & 0xFF;
-					status_payload[11] = unix_now & 0xFF;
+				// 4. PŘIDÁNO: Aktuální UNIX čas v Kontrole (32 bitů)
+				status_payload[8] = (unix_now >> 24) & 0xFF;
+				status_payload[9] = (unix_now >> 16) & 0xFF;
+				status_payload[10] = (unix_now >> 8) & 0xFF;
+				status_payload[11] = unix_now & 0xFF;
 
-					APP_DBG(">>> BLE CMD: GET STATUS (0x11) - Baterie: %d mV, Cas: %lu", bat_mv, unix_now);
-					System_Send_ACK(status_payload, 12, source);
-				} else {
-					uint8_t err_lock[4] = {cmd, 0xAA, 0x00, 0x00}; System_Send_ACK(err_lock, 4, source);
-				}
-				break;
-
-			// =====================================================
-			// SAMOSTATNÉ MĚŘENÍ BATERIE (0x14)
-			// =====================================================
-			case CMD_GET_BATTERY:
-				if (is_unlocked) {
-					uint8_t bat_payload[3];
-					int8_t temp_c;
-					uint16_t bat_mv;
-					Get_ADC_Measurements(&temp_c, &bat_mv);
-
-					bat_payload[0] = 0x14; // Odpověď na příkaz
-					bat_payload[1] = (bat_mv >> 8) & 0xFF;
-					bat_payload[2] = bat_mv & 0xFF;
-
-					APP_DBG(">>> BLE CMD: GET BATTERY (0x14) - Napeti: %d mV", bat_mv);
-					System_Send_ACK(bat_payload, 3, source);
-				} else {
-					uint8_t err_lock[4] = {cmd, 0xAA, 0x00, 0x00}; System_Send_ACK(err_lock, 4, source);
-				}
-				break;
-
-			case CMD_DOWNLOAD_ALL:
-			case CMD_DOWNLOAD_FROM_TIME:
-			case CMD_DOWNLOAD_LAST_N:
-			{
-				uint32_t param = 0;
-
-				// Pokud mobil k příkazu přibalil 4 bajty dat (N, nebo UNIX čas)
-				if (payload_len >= 5) {
-					param = ((uint32_t)payload_data[1] << 24) |
-									((uint32_t)payload_data[2] << 16) |
-									((uint32_t)payload_data[3] << 8)  |
-									 (uint32_t)payload_data[4];
-				}
-
-				uint8_t *data_ptr = NULL;
-				uint32_t data_len = 0;
-
-				// Předáme požadavek paměťovému modulu (všimni si, že param je nyní uint32_t!)
-				extern void Logger_GetDownloadData(uint8_t cmd, uint32_t param, uint8_t **start_ptr, uint32_t *len);
-				Logger_GetDownloadData(cmd, param, &data_ptr, &data_len);
-
-				if (data_len > 0 && data_ptr != NULL) {
-					APP_DBG(">>> BLE CMD: Odesilam LOGY (0x%02X) - Delka: %lu bajtu", cmd, data_len);
-					chunk_ptr = data_ptr;
-					chunk_rem_len = data_len;
-					chunk_active_cmd = cmd;
-					UTIL_SEQ_SetTask(1 << CFG_TASK_BLE_CHUNKER, CFG_SCH_PRIO_0);
-				} else {
-					APP_DBG(">>> BLE CMD: Zadne logy k odeslani (nebo zadne nevyhovuji)!");
-					uint8_t ack_empty[4] = {cmd, 0x00, 0x00, 0x00};
-					System_Send_ACK(ack_empty, 4, source);
-				}
-				break;
+				APP_DBG(">>> BLE CMD: GET STATUS (0x11) - Baterie: %d mV, Cas: %lu", bat_mv, unix_now);
+				System_Send_ACK(status_payload, 12, source);
+			} else {
+				uint8_t err_lock[4] = {cmd, 0xAA, 0x00, 0x00}; System_Send_ACK(err_lock, 4, source);
 			}
+			break;
+
+		// =====================================================
+		// SAMOSTATNÉ MĚŘENÍ BATERIE (0x14)
+		// =====================================================
+		case CMD_GET_BATTERY:
+			if (is_unlocked) {
+				uint8_t bat_payload[3];
+				int8_t temp_c;
+				uint16_t bat_mv;
+				Get_ADC_Measurements(&temp_c, &bat_mv);
+
+				bat_payload[0] = 0x14; // Odpověď na příkaz
+				bat_payload[1] = (bat_mv >> 8) & 0xFF;
+				bat_payload[2] = bat_mv & 0xFF;
+
+				APP_DBG(">>> BLE CMD: GET BATTERY (0x14) - Napeti: %d mV", bat_mv);
+				System_Send_ACK(bat_payload, 3, source);
+			} else {
+				uint8_t err_lock[4] = {cmd, 0xAA, 0x00, 0x00}; System_Send_ACK(err_lock, 4, source);
+			}
+			break;
+
+		case CMD_DOWNLOAD_ALL:
+		case CMD_DOWNLOAD_FROM_TIME:
+		case CMD_DOWNLOAD_LAST_N:
+		{
+			uint32_t param = 0;
+
+			// Pokud mobil k příkazu přibalil 4 bajty dat (N, nebo UNIX čas)
+			if (payload_len >= 5) {
+				param = ((uint32_t)payload_data[1] << 24) |
+								((uint32_t)payload_data[2] << 16) |
+								((uint32_t)payload_data[3] << 8)  |
+								 (uint32_t)payload_data[4];
+			}
+
+			uint8_t *data_ptr = NULL;
+			uint32_t data_len = 0;
+
+			// Předáme požadavek paměťovému modulu (všimni si, že param je nyní uint32_t!)
+			extern void Logger_GetDownloadData(uint8_t cmd, uint32_t param, uint8_t **start_ptr, uint32_t *len);
+			Logger_GetDownloadData(cmd, param, &data_ptr, &data_len);
+
+			if (data_len > 0 && data_ptr != NULL) {
+				APP_DBG(">>> BLE CMD: Odesilam LOGY (0x%02X) - Delka: %lu bajtu", cmd, data_len);
+				chunk_ptr = data_ptr;
+				chunk_rem_len = data_len;
+				chunk_active_cmd = cmd;
+				UTIL_SEQ_SetTask(1 << CFG_TASK_BLE_CHUNKER, CFG_SCH_PRIO_0);
+			} else {
+				APP_DBG(">>> BLE CMD: Zadne logy k odeslani (nebo zadne nevyhovuji)!");
+				uint8_t ack_empty[4] = {cmd, 0x00, 0x00, 0x00};
+				System_Send_ACK(ack_empty, 4, source);
+			}
+			break;
+		}
 
 		case CMD_IDENTIFY: // CMD_IDENTIFY (Najdi můj čip)
 			APP_DBG(">>> BLE CMD: IDENTIFY (0x40) - Zacinam signalizovat!");
