@@ -31,6 +31,14 @@ static void BeaconTimer_Callback(void);
 void APP_MAC_SendBeaconTask(void);
 extern void APP_MAC_RestartBeaconTimer(void);
 
+// =========================================================================
+// PŘIDÁNO: Dopředná deklarace a callback pro Bzučák
+// =========================================================================
+extern void APP_MAC_BuzzerTask(void);
+static void BuzzerTimer_Callback(void) {
+	UTIL_SEQ_SetTask(1 << CFG_TASK_BUZZER, CFG_SCH_PRIO_0);
+}
+
 /* variables -----------------------------------------------*/
 MAC_associateInd_t g_MAC_associateInd;
 MAC_callbacks_t macCbConfig ;
@@ -40,6 +48,7 @@ __IO ITStatus CertifOutputPeripheralReady = SET;
 
 // NASE NOVE PROMENNE PRO MAJAK
 uint8_t BeaconTimerId;
+uint8_t BuzzerTimerId; // <--- PŘIDÁNO: Proměnná pro bzučák
 
 // Globální semafor (zámek)
 volatile bool can_send_beacon = true;
@@ -70,7 +79,9 @@ void TestMode_CycleState(void) {
 }
 
 uint16_t TestMode_IdDefine(uint8_t test_machine_state) {
-	uint16_t control_id = 0;
+	// OPRAVA: Výchozí ID není 0, ale to reálné z Flash!
+	uint16_t control_id = DEVICE_CONFIG->stat_device_type;
+
 	if (test_machine_state == 1) control_id = 0;       // Vynutí CLEAR
 	else if (test_machine_state == 2) control_id = 1;  // Vynutí CHECK
 	else if (test_machine_state == 3) control_id = 2;  // Vynutí START
@@ -110,6 +121,12 @@ void APP_FFD_MAC_802_15_4_Init( APP_MAC_802_15_4_InitMode_t InitMode, TL_CmdPack
   // Vytvoreni hardwaroveho casovace
   HW_TS_Create(CFG_TIM_PROC_ID_ISR, &BeaconTimerId, hw_ts_SingleShot, BeaconTimer_Callback);
 
+  // =========================================================================
+	// PŘIDÁNO: Vytvoření časovače a Tasku pro bzučák, ať nám nekrade Maják!
+	// =========================================================================
+	HW_TS_Create(CFG_TIM_PROC_ID_ISR, &BuzzerTimerId, hw_ts_SingleShot, BuzzerTimer_Callback);
+	UTIL_SEQ_RegTask( 1<<CFG_TASK_BUZZER, UTIL_SEQ_RFU, APP_MAC_BuzzerTask);
+
   /* Configuration MAC 802_15_4 */
   APP_FFD_MAC_802_15_4_Config();
 
@@ -119,23 +136,35 @@ void APP_FFD_MAC_802_15_4_Init( APP_MAC_802_15_4_InitMode_t InitMode, TL_CmdPack
 
 void APP_FFD_MAC_802_15_4_Stop()
 {
+  APP_DBG(">>> MAC TEARDOWN: Zastavuji 50ms kulomet...");
+
+  // 1. NEJPRVE ABSOLUTNĚ ZABRÁNIT DALŠÍMU VYSÍLÁNÍ
+  can_send_beacon = false;
+
+  // 2. FYZICKY ZABÍT VŠECHNY ČASOVAČE
+  HW_TS_Stop(BeaconTimerId);
+  HW_TS_Delete(BeaconTimerId);
+  HW_TS_Stop(BuzzerTimerId);
+  HW_TS_Delete(BuzzerTimerId);
+
+  // 3. TEPRVE NYNÍ JE BEZPEČNÉ VYRESETOVAT KOPROCESOR
   MAC_resetReq_t ResetReq;
   memset(&ResetReq,0x00,sizeof(MAC_resetReq_t));
   ResetReq.set_default_PIB = TRUE;
   MAC_MLMEResetReq( &ResetReq );
   UTIL_SEQ_WaitEvt(EVENT_DEVICE_RESET_CNF);
 
+  // 4. USPAT ZBYTKOVÉ TASKY
   UTIL_SEQ_PauseTask( 1<<CFG_TASK_MSG_FROM_RF_CORE);
   UTIL_SEQ_PauseTask( 1<<CFG_TASK_FFD);
   UTIL_SEQ_PauseTask( 1<<CFG_TASK_SERVICE_COORD);
   UTIL_SEQ_PauseTask( 1<<CFG_TASK_DATA_COORD);
   UTIL_SEQ_PauseTask( 1<<CFG_TASK_RECEIVE_DATA);
   UTIL_SEQ_PauseTask( 1<<CFG_TASK_SEND_BEACON);
-
-  HW_TS_Stop(BeaconTimerId);
-  HW_TS_Delete(BeaconTimerId); // OPRAVA 2: PŘIDAT TENTO ŘÁDEK! Odstraní časovač z RAM.
+  UTIL_SEQ_PauseTask( 1<<CFG_TASK_BUZZER);
 
   BSP_LED_Off(LED_BLUE);
+  APP_DBG(">>> MAC TEARDOWN: Hotovo, prepinam na BLE.");
 }
 
 void APP_FFD_MAC_802_15_4_CoordSrvTask(void)
@@ -203,27 +232,30 @@ void APP_FFD_MAC_802_15_4_SetupTask(void)
 	MAC_MLMESetReq( &SetReq );
 	UTIL_SEQ_WaitEvt( 1U << CFG_EVT_SET_CNF );
   
-  /* Start site pro nasi Kontrolu */
-  memset(&StartReq,0x00,sizeof(MAC_startReq_t));
-  memcpy(StartReq.a_PAN_id,(uint8_t*)&panId,0x02);
-  StartReq.channel_number   = channel;
-  StartReq.beacon_order     = 0x0F;
-  StartReq.superframe_order = 0x0F;
-  StartReq.PAN_coordinator  = g_TRUE;
-  StartReq.battery_life_extension = g_FALSE;
-  MAC_MLMEStartReq( &StartReq);
-  UTIL_SEQ_WaitEvt( 1U << CFG_EVT_DEVICE_STARTED_CNF );
+	// Tvorba pasivní sítě - my vysíláme broadcast data, ne HW majáky
+	memset(&StartReq,0x00,sizeof(MAC_startReq_t));
+	memcpy(StartReq.a_PAN_id,(uint8_t*)&panId,0x02);
+	StartReq.channel_number   = channel;
+	StartReq.beacon_order     = 0x0F;
+	StartReq.superframe_order = 0x0F;
+	StartReq.PAN_coordinator  = g_TRUE;
+	StartReq.battery_life_extension = g_FALSE;
+	MAC_MLMEStartReq( &StartReq);
+	UTIL_SEQ_WaitEvt( 1U << CFG_EVT_DEVICE_STARTED_CNF );
 
-  /* Zapnuti RX pro budouci prijem pípnutí od závodníka */
-  memset(&SetReq,0x00,sizeof(MAC_setReq_t));
-  SetReq.PIB_attribute = g_MAC_RX_ON_WHEN_IDLE_c;
-  PIB_Value = g_TRUE;
-  SetReq.PIB_attribute_valuePtr = &PIB_Value;
-  MAC_MLMESetReq( &SetReq );
-  UTIL_SEQ_WaitEvt( 1U << CFG_EVT_SET_CNF );
+	// !!! USPAT ANTÉNU - Necháme prostor pro nabootování BLE Tunelu !!!
+	memset(&SetReq,0x00,sizeof(MAC_setReq_t));
+	SetReq.PIB_attribute = g_MAC_RX_ON_WHEN_IDLE_c;
+	PIB_Value = g_FALSE;
+	SetReq.PIB_attribute_valuePtr = &PIB_Value;
+	MAC_MLMESetReq( &SetReq );
+	UTIL_SEQ_WaitEvt( 1U << CFG_EVT_SET_CNF );
 
   APP_DBG("KONTROLA READY - Zapinam pravidelne vysilani majaku!");
   BSP_LED_On(LED_BLUE);
+
+  // Vzdy nabihat z BLE do usporneho rezimu (1x za sekundu)
+	current_state = STATE_ACTIVE_MAC;
 
   // ZDE POPRVE ODPALIME CASOVAC (Zacne vysilat pakety)
   APP_MAC_RestartBeaconTimer();
@@ -316,7 +348,10 @@ void APP_MAC_SendBeaconTask(void)
 #if ENABLE_HARDWARE_TEST_MODE
 	control_id = TestMode_IdDefine(test_machine_state);
 #endif
-		// =========================================================================
+	// =========================================================================
+
+	// PŘIDÁNO: Výpis do terminálu, abychom nebyli slepí!
+	//APP_DBG(">>> ODESILAM MAJAK (ID: %d) <<<", control_id);
 
 	// =========================================================================
 	// 4. BITOVÁ MAGIE: SKLÁDÁNÍ DO 6 BAJTŮ PODLE TYPU KONTROLY
@@ -432,22 +467,24 @@ static void BeaconTimer_Callback(void)
 }
 
 
+// =========================================================================
+// 1. CONFIG: REGISTRACE CALLBACKŮ A AGRESIVNÍ VYSÍLÁNÍ
+// =========================================================================
 static void APP_FFD_MAC_802_15_4_Config()
 {
   memset(&macCbConfig,0x00,sizeof(MAC_callbacks_t));
+
   macCbConfig.mlmeResetCnfCb = APP_MAC_mlmeResetCnfCb;
   macCbConfig.mlmeSetCnfCb = APP_MAC_mlmeSetCnfCb;
   macCbConfig.mlmeStartCnfCb = APP_MAC_mlmeStartCnfCb;
-  macCbConfig.mcpsDataIndCb = APP_MAC_mcpsDataIndCb;
-  macCbConfig.mcpsDataCnfCb = APP_MAC_mcpsDataCnfCb;
+  macCbConfig.mcpsDataIndCb = APP_MAC_mcpsDataIndCb; // Zpracování přijatého pípnutí
+  macCbConfig.mcpsDataCnfCb = APP_MAC_mcpsDataCnfCb; // Uvolnění semaforu can_send_beacon!
 
-  // --- AGRESIVNÍ VYSÍLÁNÍ (VYPNUTÍ CSMA/CA ČEKÁNÍ) ---
+  // --- AGRESIVNÍ VYSÍLÁNÍ (Vypnutí CSMA/CA) ---
   MAC_setReq_t setReq;
-  uint8_t max_backoffs = 0; // 0 = žádné čekání na volný kanál
-
-  setReq.PIB_attribute = 0x47; // 0x47 je standardní kód pro macMaxCSMABackoffs
+  uint8_t max_backoffs = 0;
+  setReq.PIB_attribute = 0x47; // macMaxCSMABackoffs
   setReq.PIB_attribute_valuePtr = &max_backoffs;
   MAC_MLMESetReq(&setReq);
-  // ---------------------------------------------------
 }
 

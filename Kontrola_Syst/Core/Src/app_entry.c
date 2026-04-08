@@ -39,13 +39,18 @@
 #include "dbg_trace.h"
 #include "stm_logging.h"
 
+#define NBIOT_HARDWARE_CONNECTED 0  // 0 = modul chybí, 1 = modul je zapojen
+
 #define HOST_SYS_EVTCODE                (0xFFU)
 #define HOST_SYS_SUBEVTCODE_BASE        (0x9200U)
 #define HOST_SYS_SUBEVTCODE_READY        (HOST_SYS_SUBEVTCODE_BASE + 0U)
 #define POOL_SIZE (CFG_TL_EVT_QUEUE_LENGTH * 4U * DIVC(( sizeof(TL_PacketHeader_t) + TL_EVENT_FRAME_SIZE ), 4U))
 
 /* Section specific to button management using UART */
+#if (NBIOT_HARDWARE_CONNECTED == 1)
 static void RxUART_Init(void);
+#endif
+
 static void RxCpltCallback(void);
 static void UartCmdExecute(void);
 
@@ -145,11 +150,16 @@ void APP_Init( void )
    */
   UTIL_LPM_SetOffMode(1 << CFG_LPM_APP, UTIL_LPM_DISABLE);
 
+
   Led_Init();
   Button_Init();
   HW_UART_Init(CFG_CLI_UART);
-  RxUART_Init();
 
+#if (NBIOT_HARDWARE_CONNECTED == 1)
+  RxUART_Init();
+#else
+  APP_DBG(">>> NBIOT UART bypass (Modul neni pripojen)");
+#endif
   appe_Tl_Init(); /**< Initialize all transport layers */
 
   /**
@@ -797,10 +807,12 @@ static void Receive_Notification_From_RFCore(void)
   UTIL_SEQ_SetTask(TASK_MSG_FROM_RF_CORE,CFG_SCH_PRIO_0);
 }
 
+#if (NBIOT_HARDWARE_CONNECTED == 1)
 static void RxUART_Init(void)
 {
   HW_UART_Receive_IT(CFG_CLI_UART, aRxBuffer, 1U, RxCpltCallback);
 }
+#endif
 
 static void RxCpltCallback(void)
 {

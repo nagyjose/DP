@@ -100,6 +100,8 @@ int main( void )
    */
 	SystemClock_Config(); /**< Configure the system clock */
 
+	//HAL_UART_Transmit(&huart1, (uint8_t*)"\r\n--- HW START ---\r\n", 20, 1000);
+
 	Init_Exti( );
 
 	Init_RTC();
@@ -119,9 +121,11 @@ int main( void )
 
 	snprintf(hw_ver_full, sizeof(hw_ver_full), "%s [%s]", HW_REV_BASE, git_hash);
 
+	HAL_Delay(500);
+
 	Logger_Init(); // Najde, kde jsme před havárií přestali zapisovat
 	Config_Init();
-	NBIOT_FIFO_Init();
+	//NBIOT_FIFO_Init();
 
 	while(1)
 	{

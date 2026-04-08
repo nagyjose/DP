@@ -33,6 +33,8 @@ uint32_t Get_Calendar_Seconds_Since_2000(RTC_DateTypeDef *sDate, RTC_TimeTypeDef
 extern uint8_t BuzzerTimerId; // Náš nový časovač pro blikání
 volatile uint8_t blink_counter = 0; // Kolikrát má ještě bliknout
 
+extern void APP_BLE_Stop(void);
+
 // =============================================================================
 // HARDWARE DRIVER: BZUČÁK (PWM) A LED
 // =============================================================================
@@ -413,7 +415,7 @@ MAC_Status_t APP_MAC_mlmeBeaconNotifyIndCb(const MAC_beaconNotifyInd_t * pBeacon
 // ... (Zde muzes klidne nechat smazane nebo jako NOT_IMPLEMENTED vsechny ostatni callbacky z puvodniho souboru)
 
 // =============================================================================
-// OBSLUHA MAGNETU (TLAČÍTKO SW2) - POUZE ESKALACE STAVU
+// OBSLUHA MAGNETU (TLAČÍTKO SW2) - PŘECHOD DO ZÁVODNÍHO REŽIMU
 // =============================================================================
 void APP_MAC_Magnet_Action(void)
 {
@@ -426,13 +428,39 @@ void APP_MAC_Magnet_Action(void)
 		current_state = STATE_ACTIVE_MAC;
 		APP_DBG(">>> MAGNET: Kontrola probuzena do ZAVODNIHO rezimu! <<<");
 
-		// Zablikáme a zapípáme pro vizuální potvrzení roznášeči (2 sekundy)
-		blink_counter = 8;
-		is_signal_active = false;
+		// ---------------------------------------------------------
+		// 1. ZCELA USMRTIT BLE STACK (Uvolní hardwarový arbitr antény)
+		// ---------------------------------------------------------
+		APP_BLE_Stop();
+
+		// ---------------------------------------------------------
+		// 2. PROBUZENÍ PŘIJÍMAČE MAC VRSTVY (Aby Kontrola slyšela Závodníka)
+		// ---------------------------------------------------------
+		MAC_setReq_t SetReq;
+		memset(&SetReq, 0x00, sizeof(MAC_setReq_t));
+		SetReq.PIB_attribute = g_MAC_RX_ON_WHEN_IDLE_c;
+		uint8_t PIB_Value = g_TRUE; // ZAPNUTO!
+		SetReq.PIB_attribute_valuePtr = &PIB_Value;
+		MAC_MLMESetReq( &SetReq );
+		UTIL_SEQ_WaitEvt( 1U << CFG_EVT_SET_CNF ); // Zde je WaitEvt bezpečný (standardní ST parametr)
+
+		// ---------------------------------------------------------
+		// 3. VYNUCENÍ SPRÁVNÉHO KANÁLU (Jistota po resetu)
+		// ---------------------------------------------------------
+		memset(&SetReq, 0x00, sizeof(MAC_setReq_t));
+		SetReq.PIB_attribute = 0x21; // OPRAVA: 0x21 je standardní IEEE ID pro macLogicalChannel
+		PIB_Value = 26; // DEMO_CHANNEL
+		SetReq.PIB_attribute_valuePtr = &PIB_Value;
+		MAC_MLMESetReq( &SetReq );
+		UTIL_SEQ_WaitEvt( 1U << CFG_EVT_SET_CNF );
+
+		APP_DBG(">>> SYSTEM: MAC radio pripraveno (RX ON, Kanál 26, BLE mrtve).");
+
+		// Zablikáme a zapípáme jako potvrzení startu
+		extern volatile uint8_t blink_counter;
+		blink_counter = 2;
 		UTIL_SEQ_SetTask(1 << CFG_TASK_BUZZER, CFG_SCH_PRIO_0);
-	}
-	else if (current_state == STATE_ACTIVE_MAC) {
-		// Pokud už je v závodu, magnet IGNORUJEME (Bezpečnostní pojistka)
+	} else {
 		APP_DBG(">>> MAGNET: Ignorovano. Kontrola uz je v ZAVODNIM rezimu! <<<");
 	}
 }
