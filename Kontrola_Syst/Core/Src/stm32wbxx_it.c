@@ -165,6 +165,17 @@ void RTC_WKUP_IRQHandler(void)
   HW_TS_RTC_Wakeup_Handler();
 }
 
+/* USB Nízkoúrovňový ovladač z usbd_conf.c */
+extern PCD_HandleTypeDef hpcd_USB_FS;
+
+/**
+  * @brief This function handles USB low priority interrupt.
+  */
+void USB_LP_IRQHandler(void)
+{
+  /* Přesměrování fyzického přerušení do ST USB knihovny */
+  HAL_PCD_IRQHandler(&hpcd_USB_FS);
+}
 
 
 

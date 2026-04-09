@@ -17,10 +17,14 @@
 #include "flash_logger.h"
 #include <stdbool.h>
 #include "app_ffd_mac_802_15_4_process.h"
+#include "usbd_conf.h"
+#include "usbd_def.h"
 
 extern void System_Signalize_Start(uint8_t seconds);
 extern void Get_ADC_Measurements(int8_t *out_temp, uint16_t *out_batt_mv);
 extern void NBIOT_Force_Sleep(void);
+
+extern uint8_t CDC_Transmit_FS(uint8_t* Buf, uint16_t Len);
 
 // --- PŘIDÁNO: Dopředná deklarace naší nové funkce ---
 void System_Send_ACK(uint8_t *payload, uint8_t length, uint8_t source);
@@ -802,7 +806,13 @@ void System_Send_ACK(uint8_t *payload, uint8_t length, uint8_t source) {
 		APP_DBG(">>> SYS ACK: Smerovano do NB-IoT (Zatim neimplementovano)");
 	}
 	else if (source == 2) {
-		// Odpověď do USB (Pro budoucí použití)
+		// --- NOVÉ: Odeslání po kabelu do PC ---
+		// Vložíme payload rovnou do funkce ST knihovny
+		uint8_t result = CDC_Transmit_FS(payload, length);
+
+		if (result != USBD_OK) {
+				 APP_DBG("Chyba odesilani USB (kabel byl mozna odpojen)");
+		}
 	}
 }
 

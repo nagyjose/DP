@@ -38,13 +38,29 @@
 #include "tl.h"
 #include "dbg_trace.h"
 #include "stm_logging.h"
+#include "usbd_core.h"
+#include "usbd_desc.h"
+#include "usbd_cdc.h"
+#include "usbd_cdc_if.h"
 
+
+#define CFG_USB_INTERFACE_ENABLE  0  // 1 = Zapnuto, 0 = USB se vůbec nekompiluje
 #define NBIOT_HARDWARE_CONNECTED 0  // 0 = modul chybí, 1 = modul je zapojen
 
 #define HOST_SYS_EVTCODE                (0xFFU)
 #define HOST_SYS_SUBEVTCODE_BASE        (0x9200U)
 #define HOST_SYS_SUBEVTCODE_READY        (HOST_SYS_SUBEVTCODE_BASE + 0U)
 #define POOL_SIZE (CFG_TL_EVT_QUEUE_LENGTH * 4U * DIVC(( sizeof(TL_PacketHeader_t) + TL_EVENT_FRAME_SIZE ), 4U))
+
+// Globální instance USB
+USBD_HandleTypeDef hUsbDeviceFS;
+
+// --- USB Proměnné ---
+uint8_t usb_rx_buffer[256];
+uint16_t usb_rx_len = 0;
+
+void USB_App_Init(void);
+
 
 /* Section specific to button management using UART */
 #if (NBIOT_HARDWARE_CONNECTED == 1)
@@ -72,10 +88,89 @@ extern void APP_FFD_MAC_802_15_4_CoordDataTask(void);
 
 extern void TestMode_CycleState(void);
 extern void APP_MAC_Magnet_Action(void);
+extern void System_Execute_Command(uint8_t *payload_data, uint8_t payload_len, uint8_t source);
+
+extern void HW_USB_Clock_Init(void);
 
 extern uint8_t g_srvSerReq;
 extern uint8_t g_srvDataReq;
 extern RTC_HandleTypeDef hrtc;
+
+// Zpřístupnění bufferu, do kterého nám usbd_cdc_if.c sype data
+extern uint8_t usb_rx_buffer[256];
+extern uint16_t usb_rx_len;
+
+#if (CFG_USB_INTERFACE_ENABLE != 0)
+// Tuto funkci musíš zaregistrovat k tasku v APPE_Init:
+// UTIL_SEQ_RegTask(1<<CFG_TASK_USB_PROCESS, UTIL_SEQ_RFU, APP_USB_ProcessTask);
+void APP_USB_ProcessTask(void)
+{
+	APP_DBG(">>> Pokus o odeslani do USB (Delka: %d)", usb_rx_len);
+
+	// Pokusíme se odeslat přijatá data rovnou zpět a uložíme si výsledek
+	uint8_t result = CDC_Transmit_FS(usb_rx_buffer, usb_rx_len);
+
+	// Necháme vypsat výsledek do konzole v IDE!
+	if (result == USBD_BUSY) {
+			APP_DBG("--- CHYBA: USB vraci BUSY! (Je to zablokovane)");
+	}
+	else if (result == USBD_FAIL) {
+			APP_DBG("--- CHYBA: USB vraci FAIL! (Knihovna spadla)");
+	}
+	else if (result == USBD_OK) {
+			APP_DBG("--- OK: Data narvana do HW. Pokud je nevidis, problem je v PC!");
+	}
+
+	usb_rx_len = 0;
+	memset(usb_rx_buffer, 0, sizeof(usb_rx_buffer));
+
+
+	/*
+
+	// 1. OCHRANA STRINGU: Přidáme na konec dat neviditelnou nulu pro strcmp
+	if (usb_rx_len < sizeof(usb_rx_buffer)) {
+			usb_rx_buffer[usb_rx_len] = '\0';
+	}
+
+	// 2. OZVĚNA PRO TEBE: Pošleme text ZPĚT do tvého USB terminálu, abys ho viděl!
+	char echo_msg[64];
+	int len = snprintf(echo_msg, sizeof(echo_msg), "\r\n[USB] Prijato: %s\r\n", usb_rx_buffer);
+	CDC_Transmit_FS((uint8_t*)echo_msg, len);
+
+	APP_DBG(">>> USB RX: Prijato %d bajtu z PC", usb_rx_len);
+
+	// Tady data jednoduše vezmeš a pošleš do svého existujícího parseru!
+	// Přidáš si jen nové makro SOURCE_USB (např. hodnotu 3)
+	System_Execute_Command(usb_rx_buffer, usb_rx_len, 2);
+
+	// Vyčištění bufferu pro další příjem
+	usb_rx_len = 0;
+	memset(usb_rx_buffer, 0, sizeof(usb_rx_buffer));*/
+}
+
+static void Force_USB_Reenumeration(void)
+{
+  GPIO_InitTypeDef GPIO_InitStruct = {0};
+
+  /* 1. Zapnutí hodin pro port A */
+  __HAL_RCC_GPIOA_CLK_ENABLE();
+
+  /* 2. Přepnutí pinu PA12 (USB DP) do běžného výstupu */
+  GPIO_InitStruct.Pin = GPIO_PIN_12;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+
+  /* 3. Natvrdo stáhnout pin na GND na 10 milisekund */
+  /* Počítač zaregistruje fyzické "odpojení" kabelu */
+  HAL_GPIO_WritePin(GPIOA, GPIO_PIN_12, GPIO_PIN_RESET);
+  HAL_Delay(10);
+
+  /* Jakmile to proběhne, HAL_PCD_MspInit si piny za chvíli zase správně
+     přepne do Alternate Function (USB) a počítač uslyší čisté připojení */
+}
+#endif
 
 /* Global variables  -------------------------------------------------*/
 char CommandString[C_SIZE_CMD_STRING];
@@ -150,6 +245,11 @@ void APP_Init( void )
    */
   UTIL_LPM_SetOffMode(1 << CFG_LPM_APP, UTIL_LPM_DISABLE);
 
+#if (CFG_USB_INTERFACE_ENABLE != 0)
+  // Toto říká: "Když někdo vzbudí USB task, zavolej funkci APP_USB_ProcessTask"
+  UTIL_SEQ_RegTask(1<<CFG_TASK_USB_PROCESS, UTIL_SEQ_RFU, APP_USB_ProcessTask);
+  USB_App_Init();
+#endif
 
   Led_Init();
   Button_Init();
@@ -871,4 +971,33 @@ static void UartCmdExecute(void)
     APP_DBG("NOT RECOGNIZED COMMAND : %s", CommandString);
   }
 }
+
+#if (CFG_USB_INTERFACE_ENABLE != 0)
+// Ve tvé inicializační funkci (např. tam, kde spouštíš UART nebo BLE)
+void USB_App_Init(void)
+{
+	// --- NOVÉ: Donutíme Windows zapomenout staré spojení ---
+	Force_USB_Reenumeration();
+
+  // 1. Spustíme hardwarové hodiny z Kroku 2
+  HW_USB_Clock_Init();
+
+  // 2. Inicializace ST USB Device knihovny
+  USBD_Init(&hUsbDeviceFS, &CDC_Desc, DEVICE_FS);
+
+  // 3. Zaregistrování třídy CDC (Virtual COM Port)
+  USBD_RegisterClass(&hUsbDeviceFS, &USBD_CDC);
+
+  // 4. Připojení tvého rozhraní pro čtení/zápis (soubor usbd_cdc_if.c)
+  USBD_CDC_RegisterInterface(&hUsbDeviceFS, &USBD_Interface_fops_FS);
+
+  // 5. Otevření brány (Zařízení se ukáže v PC)
+  USBD_Start(&hUsbDeviceFS);
+
+  APP_DBG(">>> USB CDC: Inicializovano a spusteno!");
+}
+#endif
+
+
+
 

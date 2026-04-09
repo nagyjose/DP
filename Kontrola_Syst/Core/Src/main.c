@@ -39,7 +39,7 @@
 
 /* Includes ------------------------------------------------------------------*/
 #include "app_common.h"
-
+#include "main.h"
 #include "app_entry.h"
 #include "stm32_lpm.h"
 #include "stm32_seq.h"
@@ -47,6 +47,8 @@
 #include "flash_logger.h"
 #include <stdio.h>  // Pro funkci snprintf
 #include "app_nbiot.h"
+#include "stm32wbxx_hal.h"
+
 
 // Tady si definuješ fyzickou revizi desky a typ
 #define HW_REV_BASE "Rev 2.1 Kontrola"
@@ -73,6 +75,8 @@ static void SystemClock_Config( void );
 static void Reset_Device( void );
 static void Reset_IPCC( void );
 static void Init_Exti( void );
+void Error_Handler(void);
+void HW_USB_Clock_Init(void);
 
 /* Functions Definition ------------------------------------------------------*/
 
@@ -100,7 +104,9 @@ int main( void )
    */
 	SystemClock_Config(); /**< Configure the system clock */
 
-	//HAL_UART_Transmit(&huart1, (uint8_t*)"\r\n--- HW START ---\r\n", 20, 1000);
+#if (CFG_USB_INTERFACE_ENABLE != 0)
+  HW_USB_Clock_Init();
+#endif
 
 	Init_Exti( );
 
@@ -359,6 +365,49 @@ void HAL_Delay(uint32_t Delay)
   #endif
 
     __WFI( );
+  }
+}
+
+
+void HW_USB_Clock_Init(void)
+{
+	// --- OPRAVA 1: ZAPNUTÍ NAPÁJENÍ USB TRANSCEIVERU ---
+	HAL_PWREx_EnableVddUSB();
+
+  RCC_PeriphCLKInitTypeDef PeriphClkInitStruct = {0};
+
+  // 1. Zapnutí HSI48 Oscilátoru
+  __HAL_RCC_HSI48_ENABLE();
+
+  // Čekání na stabilizaci hodin
+  while(__HAL_RCC_GET_FLAG(RCC_FLAG_HSI48RDY) == RESET) {}
+
+  // 2. Přesměrování 48MHz hodin do USB periferie
+  PeriphClkInitStruct.PeriphClockSelection = RCC_PERIPHCLK_USB;
+  PeriphClkInitStruct.UsbClockSelection = RCC_USBCLKSOURCE_HSI48;
+  if (HAL_RCCEx_PeriphCLKConfig(&PeriphClkInitStruct) != HAL_OK)
+  {
+    Error_Handler(); // Zachycení fatální chyby hodin
+  }
+
+  // 3. Povolení napájení pro USB periferii
+  __HAL_RCC_USB_CLK_ENABLE();
+
+  // 4. Povolení přerušení v NVIC
+  HAL_NVIC_SetPriority(USB_LP_IRQn, 0, 0); // Vysoká priorita
+  HAL_NVIC_EnableIRQ(USB_LP_IRQn);
+}
+
+/**
+  * @brief  This function is executed in case of error occurrence.
+  * @retval None
+  */
+void Error_Handler(void)
+{
+  /* Zastavení přerušení a nekonečná smyčka (Lze přidat blikání červené LED) */
+  __disable_irq();
+  while (1)
+  {
   }
 }
 
