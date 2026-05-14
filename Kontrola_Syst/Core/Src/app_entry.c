@@ -1,20 +1,20 @@
 /**
-  ******************************************************************************
+ ******************************************************************************
  * @file    app_entry.c
  * @author  MCD Application Team
  * @brief   Entry point of the Application
-  ******************************************************************************
-  * @attention
-  *
-  * Copyright (c) 2020-2021 STMicroelectronics.
-  * All rights reserved.
-  *
-  * This software is licensed under terms that can be found in the LICENSE file
-  * in the root directory of this software component.
-  * If no LICENSE file comes with this software, it is provided AS-IS.
-  *
-  ******************************************************************************
-  */
+ ******************************************************************************
+ * @attention
+ *
+ * Copyright (c) 2020-2021 STMicroelectronics.
+ * All rights reserved.
+ *
+ * This software is licensed under terms that can be found in the LICENSE file
+ * in the root directory of this software component.
+ * If no LICENSE file comes with this software, it is provided AS-IS.
+ *
+ ******************************************************************************
+ */
 
 
 /* Includes ------------------------------------------------------------------*/
@@ -43,44 +43,69 @@
 #include "usbd_cdc.h"
 #include "usbd_cdc_if.h"
 
+// ===== Defines ==========================================================================
+// ===== Global variables =================================================================
+// ===== External variables ===============================================================
+// ===== External functions ===============================================================
+// ===== Function declaration =============================================================
+// ===== Function definition ==============================================================
 
-#define CFG_USB_INTERFACE_ENABLE  0  // 1 = Zapnuto, 0 = USB se vůbec nekompiluje
-#define NBIOT_HARDWARE_CONNECTED 0  // 0 = modul chybí, 1 = modul je zapojen
+#define CFG_USB_INTERFACE_ENABLE  0   // 1 = Zapnuto, 0 = USB se vůbec nekompiluje
+#define NBIOT_HARDWARE_CONNECTED  0   // 1 = Modul zapojen, 0 = Modul odpojen
 
 #define HOST_SYS_EVTCODE                (0xFFU)
 #define HOST_SYS_SUBEVTCODE_BASE        (0x9200U)
 #define HOST_SYS_SUBEVTCODE_READY        (HOST_SYS_SUBEVTCODE_BASE + 0U)
 #define POOL_SIZE (CFG_TL_EVT_QUEUE_LENGTH * 4U * DIVC(( sizeof(TL_PacketHeader_t) + TL_EVENT_FRAME_SIZE ), 4U))
 
-// Globální instance USB
-USBD_HandleTypeDef hUsbDeviceFS;
-
-// --- USB Proměnné ---
-uint8_t usb_rx_buffer[256];
-uint16_t usb_rx_len = 0;
-
-void USB_App_Init(void);
-
-
-/* Section specific to button management using UART */
-#if (NBIOT_HARDWARE_CONNECTED == 1)
-static void RxUART_Init(void);
-#endif
-
-static void RxCpltCallback(void);
-static void UartCmdExecute(void);
-
-#define C_SIZE_CMD_STRING               256U
+#define C_SIZE_CMD_STRING       256U
 #define RX_BUFFER_SIZE          8U
 
 #define SWITCH_TMO 1000*1000/CFG_TS_TICK_VAL/2   /* 500 ms */
 
-static uint8_t aRxBuffer[RX_BUFFER_SIZE];
-EXTI_HandleTypeDef exti_handle;
-
 /* Error code */
 #define ERR_INTERFACE_FATAL_1 1
 #define ERR_INTERFACE_FATAL_2 2
+
+// ===== Global variables =================================================================
+
+// Globální instance USB
+USBD_HandleTypeDef hUsbDeviceFS;
+
+// USB Proměnné
+uint8_t usb_rx_buffer[256];
+uint16_t usb_rx_len = 0;
+
+static uint8_t aRxBuffer[RX_BUFFER_SIZE];
+EXTI_HandleTypeDef exti_handle;
+
+char CommandString[C_SIZE_CMD_STRING];
+__IO uint16_t indexReceiveChar = 0U;
+__IO uint16_t remainingRxChar = 0U;
+__IO uint16_t CptReceiveCmdFromUser = 0U;
+__IO uint16_t remainSendChar = 0U;
+__IO uint16_t CptSendCmdToUser = 0U;
+
+static SHCI_C2_CONCURRENT_Mode_Param_t ConcurrentMode = MAC_ENABLE;
+static uint8_t TS_ID1;
+
+// ===== External variables ===============================================================
+
+extern uint8_t g_srvSerReq;
+extern uint8_t g_srvDataReq;
+extern RTC_HandleTypeDef hrtc;
+
+// Zpřístupnění bufferu, do kterého usbd_cdc_if.c zapisuje data
+extern uint8_t usb_rx_buffer[256];
+extern uint16_t usb_rx_len;
+
+static TL_CmdPacket_t *p_mac_802_15_4_cmdbuffer;
+static TL_EvtPacket_t *p_mac_802_15_4_notif_RFCore_to_M4;
+static int NbTotalSwitch = 0;
+static int FlagSwitchingOnGoing = 0;
+static __IO uint32_t  CptReceiveMsgFromRFCore = 0U; /* Debug counter */
+
+// ===== External functions ===============================================================
 
 extern void APP_FFD_MAC_802_15_4_SetupTask(void);
 extern void APP_FFD_MAC_802_15_4_CoordSrvTask(void);
@@ -92,123 +117,19 @@ extern void System_Execute_Command(uint8_t *payload_data, uint8_t payload_len, u
 
 extern void HW_USB_Clock_Init(void);
 
-extern uint8_t g_srvSerReq;
-extern uint8_t g_srvDataReq;
-extern RTC_HandleTypeDef hrtc;
+// ===== Function declaration =============================================================
 
-// Zpřístupnění bufferu, do kterého nám usbd_cdc_if.c sype data
-extern uint8_t usb_rx_buffer[256];
-extern uint16_t usb_rx_len;
+void USB_App_Init(void);
 
-#if (CFG_USB_INTERFACE_ENABLE != 0)
-// Tuto funkci musíš zaregistrovat k tasku v APPE_Init:
-// UTIL_SEQ_RegTask(1<<CFG_TASK_USB_PROCESS, UTIL_SEQ_RFU, APP_USB_ProcessTask);
-void APP_USB_ProcessTask(void)
-{
-	APP_DBG(">>> Pokus o odeslani do USB (Delka: %d)", usb_rx_len);
-
-	// Pokusíme se odeslat přijatá data rovnou zpět a uložíme si výsledek
-	uint8_t result = CDC_Transmit_FS(usb_rx_buffer, usb_rx_len);
-
-	// Necháme vypsat výsledek do konzole v IDE!
-	if (result == USBD_BUSY) {
-			APP_DBG("--- CHYBA: USB vraci BUSY! (Je to zablokovane)");
-	}
-	else if (result == USBD_FAIL) {
-			APP_DBG("--- CHYBA: USB vraci FAIL! (Knihovna spadla)");
-	}
-	else if (result == USBD_OK) {
-			APP_DBG("--- OK: Data narvana do HW. Pokud je nevidis, problem je v PC!");
-	}
-
-	usb_rx_len = 0;
-	memset(usb_rx_buffer, 0, sizeof(usb_rx_buffer));
-
-
-	/*
-
-	// 1. OCHRANA STRINGU: Přidáme na konec dat neviditelnou nulu pro strcmp
-	if (usb_rx_len < sizeof(usb_rx_buffer)) {
-			usb_rx_buffer[usb_rx_len] = '\0';
-	}
-
-	// 2. OZVĚNA PRO TEBE: Pošleme text ZPĚT do tvého USB terminálu, abys ho viděl!
-	char echo_msg[64];
-	int len = snprintf(echo_msg, sizeof(echo_msg), "\r\n[USB] Prijato: %s\r\n", usb_rx_buffer);
-	CDC_Transmit_FS((uint8_t*)echo_msg, len);
-
-	APP_DBG(">>> USB RX: Prijato %d bajtu z PC", usb_rx_len);
-
-	// Tady data jednoduše vezmeš a pošleš do svého existujícího parseru!
-	// Přidáš si jen nové makro SOURCE_USB (např. hodnotu 3)
-	System_Execute_Command(usb_rx_buffer, usb_rx_len, 2);
-
-	// Vyčištění bufferu pro další příjem
-	usb_rx_len = 0;
-	memset(usb_rx_buffer, 0, sizeof(usb_rx_buffer));*/
-}
-
-static void Force_USB_Reenumeration(void)
-{
-  GPIO_InitTypeDef GPIO_InitStruct = {0};
-
-  /* 1. Zapnutí hodin pro port A */
-  __HAL_RCC_GPIOA_CLK_ENABLE();
-
-  /* 2. Přepnutí pinu PA12 (USB DP) do běžného výstupu */
-  GPIO_InitStruct.Pin = GPIO_PIN_12;
-  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
-  GPIO_InitStruct.Pull = GPIO_NOPULL;
-  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
-
-  /* 3. Natvrdo stáhnout pin na GND na 10 milisekund */
-  /* Počítač zaregistruje fyzické "odpojení" kabelu */
-  HAL_GPIO_WritePin(GPIOA, GPIO_PIN_12, GPIO_PIN_RESET);
-  HAL_Delay(10);
-
-  /* Jakmile to proběhne, HAL_PCD_MspInit si piny za chvíli zase správně
-     přepne do Alternate Function (USB) a počítač uslyší čisté připojení */
-}
+#if (NBIOT_HARDWARE_CONNECTED == 1)
+static void RxUART_Init(void);
 #endif
 
-/* Global variables  -------------------------------------------------*/
-char CommandString[C_SIZE_CMD_STRING];
-__IO uint16_t indexReceiveChar = 0U;
-__IO uint16_t remainingRxChar = 0U;
-__IO uint16_t CptReceiveCmdFromUser = 0U;
-__IO uint16_t remainSendChar = 0U;
-__IO uint16_t CptSendCmdToUser = 0U;
+static void RxCpltCallback(void);
+static void UartCmdExecute(void);
 
-/* Private function definition -------------------------------------------------*/
-
-PLACE_IN_SECTION("MB_MEM1") ALIGN(4) static TL_MAC_802_15_4_Config_t Mac_802_15_4_ConfigBuffer;
-
-PLACE_IN_SECTION("MB_MEM2") ALIGN(4) static TL_CmdPacket_t Mac_802_15_4_CmdBuffer;
-PLACE_IN_SECTION("MB_MEM2") ALIGN(4) static uint8_t Mac_802_15_4_NotifRspEvtBuffer[sizeof(TL_PacketHeader_t) + TL_EVT_HDR_SIZE + 255U];
-
-PLACE_IN_SECTION("MB_MEM2") ALIGN(4) static uint8_t EvtPool[POOL_SIZE];
-PLACE_IN_SECTION("MB_MEM2") ALIGN(4) static TL_CmdPacket_t SystemCmdBuffer;
-PLACE_IN_SECTION("MB_MEM2") ALIGN(4) static uint8_t SystemSpareEvtBuffer[sizeof(TL_PacketHeader_t) + TL_EVT_HDR_SIZE + 255U];
-
-PLACE_IN_SECTION("MB_MEM2") ALIGN(4) char mac_802_15_4_CnfIndNot[C_SIZE_CMD_STRING];
-
-static SHCI_C2_CONCURRENT_Mode_Param_t ConcurrentMode = MAC_ENABLE;
-static uint8_t TS_ID1;
-
-
-/*----------------------------------------------------------------------------*/
-static TL_CmdPacket_t *p_mac_802_15_4_cmdbuffer;
-static TL_EvtPacket_t *p_mac_802_15_4_notif_RFCore_to_M4;
-static int NbTotalSwitch = 0;
-static int FlagSwitchingOnGoing = 0;
-static __IO uint32_t  CptReceiveMsgFromRFCore = 0U; /* Debug counter */
-
-
-/* Global function prototypes -----------------------------------------------*/
 size_t DbgTraceWrite(int handle, const unsigned char * buf, size_t bufSize);
 
-/* Private function prototypes -----------------------------------------------*/
 static void appe_Tl_Init(void);
 static void Led_Init(void);
 static void Button_Init( void );
@@ -226,8 +147,91 @@ static void APPE_SysEvtReadyProcessing( void);
 static void APP_TraceError(char * pMess, uint32_t ErrCode);
 static void APP_CheckWirelessFirmwareInfo(void);
 
+// ===== Function definition ==============================================================
 
-/* Functions Definition ------------------------------------------------------*/
+PLACE_IN_SECTION("MB_MEM1") ALIGN(4) static TL_MAC_802_15_4_Config_t Mac_802_15_4_ConfigBuffer;
+
+PLACE_IN_SECTION("MB_MEM2") ALIGN(4) static TL_CmdPacket_t Mac_802_15_4_CmdBuffer;
+PLACE_IN_SECTION("MB_MEM2") ALIGN(4) static uint8_t Mac_802_15_4_NotifRspEvtBuffer[sizeof(TL_PacketHeader_t) + TL_EVT_HDR_SIZE + 255U];
+
+PLACE_IN_SECTION("MB_MEM2") ALIGN(4) static uint8_t EvtPool[POOL_SIZE];
+PLACE_IN_SECTION("MB_MEM2") ALIGN(4) static TL_CmdPacket_t SystemCmdBuffer;
+PLACE_IN_SECTION("MB_MEM2") ALIGN(4) static uint8_t SystemSpareEvtBuffer[sizeof(TL_PacketHeader_t) + TL_EVT_HDR_SIZE + 255U];
+
+PLACE_IN_SECTION("MB_MEM2") ALIGN(4) char mac_802_15_4_CnfIndNot[C_SIZE_CMD_STRING];
+
+
+#if (CFG_USB_INTERFACE_ENABLE != 0)
+// UTIL_SEQ_RegTask(1<<CFG_TASK_USB_PROCESS, UTIL_SEQ_RFU, APP_USB_ProcessTask);
+void APP_USB_ProcessTask(void)
+{
+	APP_DBG(">>> Pokus o odeslani do USB (Delka: %d)", usb_rx_len);
+
+	// Pokus odeslat přijatá data rovnou zpět a uložení výsledku
+	uint8_t result = CDC_Transmit_FS(usb_rx_buffer, usb_rx_len);
+
+	// Výpis výsledku do konzole v IDE!
+	if (result == USBD_BUSY) {
+			APP_DBG("--- CHYBA: USB vraci BUSY! (Je to zablokovane)");
+	}
+	else if (result == USBD_FAIL) {
+			APP_DBG("--- CHYBA: USB vraci FAIL! (Knihovna spadla)");
+	}
+	else if (result == USBD_OK) {
+			APP_DBG("--- OK: Data narvana do HW. Pokud je nevidis, problem je v PC!");
+	}
+
+	usb_rx_len = 0;
+	memset(usb_rx_buffer, 0, sizeof(usb_rx_buffer));
+
+
+	/*
+
+	// Přidání ukončení dat pro strcmp
+	if (usb_rx_len < sizeof(usb_rx_buffer)) {
+			usb_rx_buffer[usb_rx_len] = '\0';
+	}
+
+	// Zpětné odeslání dat
+	char echo_msg[64];
+	int len = snprintf(echo_msg, sizeof(echo_msg), "\r\n[USB] Prijato: %s\r\n", usb_rx_buffer);
+	CDC_Transmit_FS((uint8_t*)echo_msg, len);
+
+	APP_DBG(">>> USB RX: Prijato %d bajtu z PC", usb_rx_len);
+
+	// Předání dat do parseru
+	System_Execute_Command(usb_rx_buffer, usb_rx_len, 2);
+
+	// Vyčištění bufferu pro další příjem
+	usb_rx_len = 0;
+	memset(usb_rx_buffer, 0, sizeof(usb_rx_buffer));*/
+}
+
+static void Force_USB_Reenumeration(void)
+{
+  GPIO_InitTypeDef GPIO_InitStruct = {0};
+
+  // 1. Zapnutí hodin pro port A
+  __HAL_RCC_GPIOA_CLK_ENABLE();
+
+  // 2. Přepnutí pinu PA12 (USB DP) do běžného výstupu
+  GPIO_InitStruct.Pin = GPIO_PIN_12;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+
+  // 3. Stáhnout pin na GND na 10 milisekund
+  // Počítač zaregistruje fyzické "odpojení" kabelu
+  HAL_GPIO_WritePin(GPIOA, GPIO_PIN_12, GPIO_PIN_RESET);
+  HAL_Delay(10);
+
+  // Jakmile to proběhne, HAL_PCD_MspInit si piny za chvíli zase správně
+  // přepne do Alternate Function (USB) a počítač uslyší čisté připojení
+}
+#endif
+
+
 void APP_Init( void )
 {
  SystemPower_Config(); /**< Configure the system Power Mode */
@@ -246,7 +250,6 @@ void APP_Init( void )
   UTIL_LPM_SetOffMode(1 << CFG_LPM_APP, UTIL_LPM_DISABLE);
 
 #if (CFG_USB_INTERFACE_ENABLE != 0)
-  // Toto říká: "Když někdo vzbudí USB task, zavolej funkci APP_USB_ProcessTask"
   UTIL_SEQ_RegTask(1<<CFG_TASK_USB_PROCESS, UTIL_SEQ_RFU, APP_USB_ProcessTask);
   USB_App_Init();
 #endif
@@ -973,10 +976,9 @@ static void UartCmdExecute(void)
 }
 
 #if (CFG_USB_INTERFACE_ENABLE != 0)
-// Ve tvé inicializační funkci (např. tam, kde spouštíš UART nebo BLE)
 void USB_App_Init(void)
 {
-	// --- NOVÉ: Donutíme Windows zapomenout staré spojení ---
+	// Force to Windows zapomenout staré spojení
 	Force_USB_Reenumeration();
 
   // 1. Spustíme hardwarové hodiny z Kroku 2

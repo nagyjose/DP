@@ -22,41 +22,46 @@
 #include "flash_logger.h"
 #include "app_conf.h"
 
-/* Defines -----------------------------------------------*/
+// ===== Defines ==========================================================================
+
 #define DEMO_CHANNEL 26
 
-/* Private function prototypes -----------------------------------------------*/
-static void APP_FFD_MAC_802_15_4_Config(void);
-static void BeaconTimer_Callback(void);
-void APP_MAC_SendBeaconTask(void);
-extern void APP_MAC_RestartBeaconTimer(void);
+// ===== Global variables =================================================================
 
-// =========================================================================
-// PŘIDÁNO: Dopředná deklarace a callback pro Bzučák
-// =========================================================================
-extern void APP_MAC_BuzzerTask(void);
-static void BuzzerTimer_Callback(void) {
-	UTIL_SEQ_SetTask(1 << CFG_TASK_BUZZER, CFG_SCH_PRIO_0);
-}
-
-/* variables -----------------------------------------------*/
 MAC_associateInd_t g_MAC_associateInd;
 MAC_callbacks_t macCbConfig ;
 uint8_t g_srvSerReq;
 uint8_t g_srvDataReq;
 __IO ITStatus CertifOutputPeripheralReady = SET;
 
-// NASE NOVE PROMENNE PRO MAJAK
 uint8_t BeaconTimerId;
-uint8_t BuzzerTimerId; // <--- PŘIDÁNO: Proměnná pro bzučák
+uint8_t BuzzerTimerId;
 
 // Globální semafor (zámek)
 volatile bool can_send_beacon = true;
 
-// =============================================================================
-// TESTOVACÍ STAVOVÝ AUTOMAT (POUZE PRO VÝVOJ)
-// =============================================================================
+// ===== External variables ===============================================================
 
+extern RTC_HandleTypeDef hrtc;
+
+// ===== External functions ===============================================================
+
+extern void APP_MAC_RestartBeaconTimer(void);
+extern void APP_MAC_BuzzerTask(void);
+
+// ===== Function declaration =============================================================
+
+static void APP_FFD_MAC_802_15_4_Config(void);
+static void BeaconTimer_Callback(void);
+void APP_MAC_SendBeaconTask(void);
+
+// ===== Function definition ==============================================================
+
+static void BuzzerTimer_Callback(void) {
+	UTIL_SEQ_SetTask(1 << CFG_TASK_BUZZER, CFG_SCH_PRIO_0);
+}
+
+// TESTOVACÍ STAVOVÝ AUTOMAT (POUZE PRO VÝVOJ)
 #if ENABLE_HARDWARE_TEST_MODE
 volatile uint8_t test_machine_state = 0; // 0=Vypnuto (Config), 1=CLEAR, 2=CHECK, 3=START, 4=CIL, 5=STANDARD
 
@@ -95,10 +100,8 @@ uint16_t TestMode_IdDefine(uint8_t test_machine_state) {
 	return control_id;
 }
 #endif
-// =============================================================================
 
 
-/* Functions Definition ------------------------------------------------------*/
 void APP_FFD_MAC_802_15_4_Init( APP_MAC_802_15_4_InitMode_t InitMode, TL_CmdPacket_t* pCmdBuffer)
 {
   APP_ENTRY_RegisterCmdBuffer(pCmdBuffer);
@@ -115,15 +118,13 @@ void APP_FFD_MAC_802_15_4_Init( APP_MAC_802_15_4_InitMode_t InitMode, TL_CmdPack
   UTIL_SEQ_RegTask( 1<<CFG_TASK_DATA_COORD, UTIL_SEQ_RFU,APP_FFD_MAC_802_15_4_CoordDataTask);
   UTIL_SEQ_RegTask( 1<<CFG_TASK_RECEIVE_DATA, UTIL_SEQ_RFU,APP_MAC_ReceiveData);
 
-  // NASE NOVA ULOHA PRO VYSILANI MAJAKU
+  // Task pro vysílání majáku
   UTIL_SEQ_RegTask( 1<<CFG_TASK_SEND_BEACON, UTIL_SEQ_RFU, APP_MAC_SendBeaconTask);
 
   // Vytvoreni hardwaroveho casovace
   HW_TS_Create(CFG_TIM_PROC_ID_ISR, &BeaconTimerId, hw_ts_SingleShot, BeaconTimer_Callback);
 
-  // =========================================================================
-	// PŘIDÁNO: Vytvoření časovače a Tasku pro bzučák, ať nám nekrade Maják!
-	// =========================================================================
+	// Vytvoření časovače a Tasku pro bzučák
 	HW_TS_Create(CFG_TIM_PROC_ID_ISR, &BuzzerTimerId, hw_ts_SingleShot, BuzzerTimer_Callback);
 	UTIL_SEQ_RegTask( 1<<CFG_TASK_BUZZER, UTIL_SEQ_RFU, APP_MAC_BuzzerTask);
 
@@ -138,23 +139,23 @@ void APP_FFD_MAC_802_15_4_Stop()
 {
   APP_DBG(">>> MAC TEARDOWN: Zastavuji 50ms kulomet...");
 
-  // 1. NEJPRVE ABSOLUTNĚ ZABRÁNIT DALŠÍMU VYSÍLÁNÍ
+  // 1. Zabránění dalšímu vysílání
   can_send_beacon = false;
 
-  // 2. FYZICKY ZABÍT VŠECHNY ČASOVAČE
+  // 2. Ukončení časovačů
   HW_TS_Stop(BeaconTimerId);
   HW_TS_Delete(BeaconTimerId);
   HW_TS_Stop(BuzzerTimerId);
   HW_TS_Delete(BuzzerTimerId);
 
-  // 3. TEPRVE NYNÍ JE BEZPEČNÉ VYRESETOVAT KOPROCESOR
+  // 3. Reset koprocesoru
   MAC_resetReq_t ResetReq;
   memset(&ResetReq,0x00,sizeof(MAC_resetReq_t));
   ResetReq.set_default_PIB = TRUE;
   MAC_MLMEResetReq( &ResetReq );
   UTIL_SEQ_WaitEvt(EVENT_DEVICE_RESET_CNF);
 
-  // 4. USPAT ZBYTKOVÉ TASKY
+  // 4. Uspání všech tasků
   UTIL_SEQ_PauseTask( 1<<CFG_TASK_MSG_FROM_RF_CORE);
   UTIL_SEQ_PauseTask( 1<<CFG_TASK_FFD);
   UTIL_SEQ_PauseTask( 1<<CFG_TASK_SERVICE_COORD);
@@ -169,7 +170,6 @@ void APP_FFD_MAC_802_15_4_Stop()
 
 void APP_FFD_MAC_802_15_4_CoordSrvTask(void)
 {
-  // PRO KONTROLU NEPOTREBUJEME ZADNOU ASOCIACI, ZAVODNIK JEN POSLOUCHA
   g_srvSerReq = CFG_SRV_SER_REQ_NBR;
 }
 
@@ -185,7 +185,7 @@ void APP_FFD_MAC_802_15_4_SetupTask(void)
   MAC_setReq_t      SetReq;
   MAC_startReq_t    StartReq;
 
-  long long extAddr = 0xACDE480000000001; // Zde pak dame unikatni MAC adresu Kontroly
+  long long extAddr = 0xACDE480000000001; // Unikatni MAC adresu Kontroly
   uint16_t shortAddr   = 0x1122;
   uint16_t panId       = 0x1AAA;
   uint8_t channel      = DEMO_CHANNEL;
@@ -243,7 +243,7 @@ void APP_FFD_MAC_802_15_4_SetupTask(void)
 	MAC_MLMEStartReq( &StartReq);
 	UTIL_SEQ_WaitEvt( 1U << CFG_EVT_DEVICE_STARTED_CNF );
 
-	// !!! USPAT ANTÉNU - Necháme prostor pro nabootování BLE Tunelu !!!
+	// Uspání antény - Necháme prostor pro nabootování Tunelu
 	memset(&SetReq,0x00,sizeof(MAC_setReq_t));
 	SetReq.PIB_attribute = g_MAC_RX_ON_WHEN_IDLE_c;
 	PIB_Value = g_TRUE;
@@ -257,16 +257,11 @@ void APP_FFD_MAC_802_15_4_SetupTask(void)
   // Vzdy nabihat z BLE do usporneho rezimu (1x za sekundu)
 	//current_state = STATE_ACTIVE_MAC;
 
-  // ZDE POPRVE ODPALIME CASOVAC (Zacne vysilat pakety)
+  // Začátek vysílání
   APP_MAC_RestartBeaconTimer();
 }
 
-
-extern RTC_HandleTypeDef hrtc; // Zpřístupníme si RTC strukturu z main.c
-
-// -----------------------------------------------------------------------------
-// VYLEPŠENÝ PŘEVOD: Vrací pouze sekundy od 1.1.2000 (Zabraňuje přetečení)
-// -----------------------------------------------------------------------------
+// Vylepšený převod -- Vrací pouze sekundy od 1.1.2000 (Zabraňuje přetečení)
 uint32_t Get_Calendar_Seconds_Since_2000(RTC_DateTypeDef *sDate, RTC_TimeTypeDef *sTime)
 {
     uint8_t a = (14 - sDate->Month) / 12;
@@ -292,15 +287,13 @@ uint32_t Get_Calendar_Seconds_Since_2000(RTC_DateTypeDef *sDate, RTC_TimeTypeDef
     return cal_seconds;
 }
 
-// -----------------------------------------------------------------------------
-// ODESÍLACÍ FUNKCE KONTROLY (S OCHRANOU PROTI ZPOMALENÉMU RTC)
-// -----------------------------------------------------------------------------
+// Odesílací funkce kontroly s ochranou proti pomalému RTC
 void APP_MAC_SendBeaconTask(void)
 {
-	// 1. OCHRANA PROTI ZADUŠENÍ (Semafor)
+	// Ochrana proti zasycení (Semafor)
 	if (!can_send_beacon) {
-		// Koprocesor ještě bojuje s předchozím paketem!
-		// Přeskočíme toto kolo, ať ho neudusíme.
+		// Koprocesor ještě pracuje s předchozím paketem
+		// Přeskočíme toto kolo, ať se nezasytí
 		return;
 	}
 
@@ -310,11 +303,11 @@ void APP_MAC_SendBeaconTask(void)
 	RTC_TimeTypeDef sTime = {0};
 	RTC_DateTypeDef sDate = {0};
 
-	// 1. Odemknutí registrů
+	// Odemknutí registrů
 	HAL_RTC_GetTime(&hrtc, &sTime, RTC_FORMAT_BIN);
 	HAL_RTC_GetDate(&hrtc, &sDate, RTC_FORMAT_BIN);
 
-	// 2. ČTENÍ PŘÍMO Z HARDWARU
+	// Čtení přímo z hardwaru
 	uint32_t ssr = RTC->SSR;
 	uint32_t prer_s = RTC->PRER & RTC_PRER_PREDIV_S;
 	uint32_t prer_a = (RTC->PRER & RTC_PRER_PREDIV_A) >> 16;
@@ -322,7 +315,7 @@ void APP_MAC_SendBeaconTask(void)
 	if (prer_s == 0) prer_s = 255;
 	if (prer_a == 0) prer_a = 127;
 
-	// Zjistíme frekvenci (obvykle 256 Hz) a kolik reálných sekund trvá 1 tik kalendáře (obvykle 10s u ST)
+	// Zjistíme frekvenci (obvykle 256 Hz) a kolik reálných sekund trvá 1 tik kalendáře (obvykle 10 s)
 	uint32_t ssr_freq = 32768 / (prer_a + 1);
 	uint32_t seconds_per_tick = (prer_s + 1) / ssr_freq;
 	if (seconds_per_tick == 0) seconds_per_tick = 1;
@@ -330,7 +323,7 @@ void APP_MAC_SendBeaconTask(void)
 	// Přesný počet milisekund od posledního kalendářního tiku
 	uint32_t ms_within_tick = ((prer_s - ssr) * 1000) / ssr_freq;
 
-	// 3. ZÍSKÁNÍ PŘESNÝCH DESETIN A UNIX ČASU
+	// Získání přesných desetin z unix času
 	uint8_t tenths = (ms_within_tick % 1000) / 100;
 
 	uint32_t cal_seconds = Get_Calendar_Seconds_Since_2000(&sDate, &sTime);
@@ -342,20 +335,14 @@ void APP_MAC_SendBeaconTask(void)
 	// Čteme ID kontroly přímo z Flash paměti
 	uint16_t control_id = DEVICE_CONFIG->stat_device_type;
 
-	// =========================================================================
-	// INJEKCE TESTOVACÍHO STAVOVÉHO AUTOMATU
-	// =========================================================================
+	// Injekce testovacího stavového automatu
 #if ENABLE_HARDWARE_TEST_MODE
 	control_id = TestMode_IdDefine(test_machine_state);
 #endif
-	// =========================================================================
 
-	// PŘIDÁNO: Výpis do terminálu, abychom nebyli slepí!
 	//APP_DBG(">>> ODESILAM MAJAK (ID: %d) <<<", control_id);
 
-	// =========================================================================
-	// 4. BITOVÁ MAGIE: SKLÁDÁNÍ DO 6 BAJTŮ PODLE TYPU KONTROLY
-	// =========================================================================
+	// Skládání dat do 6 bytů dle typu kontroly
 	if (control_id == 0)
 	{
 		// --- A) KONTROLA CLEAR ---
@@ -389,7 +376,7 @@ void APP_MAC_SendBeaconTask(void)
 		payload[5] = (uint8_t)(unix_time & 0xFF);
 	}
 
-	// 5. ODESLÁNÍ DO VZDUCHU
+	// Odesílání do vzduchu
 	MAC_dataReq_t dataReq;
 	memset(&dataReq, 0, sizeof(MAC_dataReq_t));
 
@@ -410,7 +397,7 @@ void APP_MAC_SendBeaconTask(void)
 	dataReq.GTS_Tx = 0x00;
 	dataReq.indirect_Tx = 0x00;
 
-	// 2. ZAMKNUTÍ SEMAFORU A ODESLÁNÍ
+	// Zamknutí semaforu a odeslání
 	can_send_beacon = false;
 	// Ochrana proti přerušení řetězce
 	if (MAC_MCPSDataReq(&dataReq) != MAC_SUCCESS) {
@@ -423,9 +410,9 @@ void APP_MAC_SendBeaconTask(void)
 static void BeaconTimer_Callback(void)
 {
 	static uint8_t stuck_counter = 0;
-	static uint8_t fatal_error_counter = 0; // NOVÁ PROMĚNNÁ
+	static uint8_t fatal_error_counter = 0;
 
-	// POJISTKA SEMAFORU (Timeout)
+	// Pojistka semaforu (Timeout)
 	if (!can_send_beacon) {
 		stuck_counter++;
 		if (stuck_counter > 5) {
@@ -447,16 +434,14 @@ static void BeaconTimer_Callback(void)
 		fatal_error_counter = 0; // Rádio odpovědělo, vše je OK
 	}
 
-	// =========================================================================
-	// STAVOVÝ AUTOMAT: VÝPOČET FREKVENCE MAJÁKU
-	// =========================================================================
+	// Stavový automat - výpočet frekvence majáku
 	uint32_t period_ms;
 
 	if (current_state == STATE_IDLE_MAC) {
-		// ÚSPORNÝ REŽIM: 1x za sekundu (Šetříme baterii před závodem)
+		// ÚSPORNÝ REŽIM: 1x za sekundu (šetření baterie)
 		period_ms = 1000;
 	} else {
-		// ZÁVODNÍ REŽIM: Rychlá palba podle konfigurace (např. 50 ms)
+		// ZÁVODNÍ REŽIM: Rychlé vysílání podle konfigurace (např. 50 ms)
 		period_ms = DEVICE_CONFIG->beacon_period_ms;
 		if (period_ms < 10) period_ms = 50; // Bezpečnostní pojistka
 	}
@@ -466,10 +451,7 @@ static void BeaconTimer_Callback(void)
 	UTIL_SEQ_SetTask(1 << CFG_TASK_SEND_BEACON, CFG_SCH_PRIO_0);
 }
 
-
-// =========================================================================
-// 1. CONFIG: REGISTRACE CALLBACKŮ A AGRESIVNÍ VYSÍLÁNÍ
-// =========================================================================
+// Konfigurace -- nastavení registrů a vysílání
 static void APP_FFD_MAC_802_15_4_Config()
 {
   memset(&macCbConfig,0x00,sizeof(MAC_callbacks_t));
@@ -480,7 +462,7 @@ static void APP_FFD_MAC_802_15_4_Config()
   macCbConfig.mcpsDataIndCb = APP_MAC_mcpsDataIndCb; // Zpracování přijatého pípnutí
   macCbConfig.mcpsDataCnfCb = APP_MAC_mcpsDataCnfCb; // Uvolnění semaforu can_send_beacon!
 
-  // --- AGRESIVNÍ VYSÍLÁNÍ (Vypnutí CSMA/CA) ---
+  // Agresivní vysílání (Vypnutí CSMA/CA)
   MAC_setReq_t setReq;
   uint8_t max_backoffs = 0;
   setReq.PIB_attribute = 0x47; // macMaxCSMABackoffs

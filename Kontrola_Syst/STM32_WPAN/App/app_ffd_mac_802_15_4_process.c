@@ -18,30 +18,7 @@
 #include "flash_logger.h"
 #include "app_nbiot.h"
 
-volatile BeaconState_t current_state = STATE_ACTIVE_MAC;
-
-/* Global variables ----------------------------------------------------------*/
-int volatile FrameOnGoing = FALSE;
-extern MAC_associateInd_t g_MAC_associateInd;
-MAC_dataInd_t      g_DataInd;
-
-extern uint8_t BeaconTimerId; // Náš časovač z druhého souboru
-extern volatile bool can_send_beacon;
-extern RTC_HandleTypeDef hrtc;
-uint32_t Get_Calendar_Seconds_Since_2000(RTC_DateTypeDef *sDate, RTC_TimeTypeDef *sTime);
-
-extern uint8_t BuzzerTimerId; // Náš nový časovač pro blikání
-volatile uint8_t blink_counter = 0; // Kolikrát má ještě bliknout
-
-extern void APP_BLE_Stop(void);
-
-// Musíme ten payload bezpečně vykopírovat ven dřív, než uvolníme koprocesor.
-static uint8_t rx_payload_safe_kontrola[128];
-
-// =============================================================================
-// HARDWARE DRIVER: BZUČÁK (PWM) A LED
-// =============================================================================
-TIM_HandleTypeDef htim16; // Náš hardwarový časovač pro bzučák
+// ===== Defines ==========================================================================
 
 // Makra pro spuštění a zastavení hardwarového PWM
 #define BUZZER_ON()     HAL_TIM_PWM_Start(&htim16, TIM_CHANNEL_1)
@@ -50,11 +27,37 @@ TIM_HandleTypeDef htim16; // Náš hardwarový časovač pro bzučák
 // Perioda jednoho tiku signalizace v milisekundách
 #define SIGNAL_PERIOD_MS 100
 
+// ===== Global variables =================================================================
+
+volatile BeaconState_t current_state = STATE_ACTIVE_MAC;
+int volatile FrameOnGoing = FALSE;
+MAC_dataInd_t      g_DataInd;
+volatile uint8_t blink_counter = 0; // Kolikrát má ještě bliknout
+
+// Musíme ten payload bezpečně vykopírovat ven dřív, než uvolníme koprocesor.
+static uint8_t rx_payload_safe_kontrola[128];
+TIM_HandleTypeDef htim16; // Hardwarový časovač pro bzučák
 static bool is_signal_active = false; // Pomocná proměnná pro střídání stavu
 
-// -----------------------------------------------------------------------------
-// MANUÁLNÍ INICIALIZACE PWM (Bez CubeMX)
-// -----------------------------------------------------------------------------
+// ===== External variables ===============================================================
+
+extern MAC_associateInd_t g_MAC_associateInd;
+extern uint8_t BeaconTimerId; // časovač z druhého souboru
+extern volatile bool can_send_beacon;
+extern RTC_HandleTypeDef hrtc;
+extern uint8_t BuzzerTimerId; // časovač pro blikání
+
+// ===== External functions ===============================================================
+
+extern void APP_BLE_Stop(void);
+
+// ===== Function declaration =============================================================
+
+uint32_t Get_Calendar_Seconds_Since_2000(RTC_DateTypeDef *sDate, RTC_TimeTypeDef *sTime);
+
+// ===== Function definition ==============================================================
+
+// Inicializace PWM
 void Buzzer_PWM_Init(void)
 {
 	TIM_OC_InitTypeDef sConfigOC = {0};
@@ -68,7 +71,7 @@ void Buzzer_PWM_Init(void)
 	GPIO_InitStruct.Pin = GPIO_PIN_8;
 	GPIO_InitStruct.Mode = GPIO_MODE_AF_PP; // Alternativní funkce (Push-Pull)
 	GPIO_InitStruct.Pull = GPIO_NOPULL;
-	// KRITICKÉ PRO EMC: Low Speed zamezí ostrým hranám a vysokofrekvenčnímu rušení!
+	// KRITICKÉ PRO EMC: Low Speed zamezí ostrým hranám a vysokofrekvenčnímu rušení
 	GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
 	// Na STM32WB55 je TIM16_CH1 mapován na PB8 přes Alternate Function 14 (AF14)
 	GPIO_InitStruct.Alternate = GPIO_AF14_TIM16;
@@ -100,9 +103,7 @@ void Buzzer_PWM_Init(void)
 	}
 }
 
-// -----------------------------------------------------------------------------
-// UNIVERZÁLNÍ API PRO SPUŠTĚNÍ SIGNALIZACE
-// -----------------------------------------------------------------------------
+// Univerzální API pro spuštění signalizace
 void System_Signalize_Start(uint8_t seconds)
 {
 	// Procesor si sám spočítá, kolikrát musí změnit stav (tiknout)
@@ -119,9 +120,7 @@ void System_Signalize_Start(uint8_t seconds)
 	}
 }
 
-// -----------------------------------------------------------------------------
-// ASYNCHRONNÍ TASK PRO BLIKÁNÍ A PÍPÁNÍ
-// -----------------------------------------------------------------------------
+// Asynchroní task pro blikání a pípání
 void APP_MAC_BuzzerTask(void)
 {
 	if (blink_counter > 0)
@@ -150,22 +149,17 @@ void APP_MAC_BuzzerTask(void)
 	}
 }
 
-// -----------------------------------------------------------------------------
-// FUNKCE PRO NASTARTOVÁNI ČASOVAČE S NÁHODNÝM ROZPTYLEM (JITTER)
-// -----------------------------------------------------------------------------
+// Přidání jitteru do časovače
 void APP_MAC_RestartBeaconTimer(void)
 {
   // Vygenerujeme nahodny cas 18 az 22 milisekund pro zabraneni kolizim
   uint32_t jitter_ms = 18 + (rand() % 5);
 
-  // Prepocet z milisekund na interni ticky (CFG_TS_TICK_VAL je vetsinou z app_conf.h)
+  // Prepocet z milisekund na interni ticky
   HW_TS_Start(BeaconTimerId, (uint32_t)(jitter_ms * 1000 / CFG_TS_TICK_VAL));
 }
 
-// =============================================================================
-// MAC CALLBACKS
-// =============================================================================
-
+// MAC callbacks
 MAC_Status_t APP_MAC_mlmeResetCnfCb( const  MAC_resetCnf_t * pResetCnf )
 {
   UTIL_SEQ_SetEvt(EVENT_DEVICE_RESET_CNF);
@@ -184,9 +178,7 @@ MAC_Status_t APP_MAC_mlmeStartCnfCb( const  MAC_startCnf_t * pStartCnf )
   return MAC_SUCCESS; // Puvodne tu bylo NOT IMPLEMENTED
 }
 
-// =============================================================================
-// HARDWARE DRIVER: UNIFIKOVANÉ MĚŘENÍ ADC (TEPLOTA + BATERIE)
-// =============================================================================
+// Unifikované měření ADC (Teplota + Akumulátor)
 void Get_ADC_Measurements(int8_t *out_temp, uint16_t *out_batt_mv)
 {
 	ADC_HandleTypeDef hadc1 = {0};
@@ -198,11 +190,11 @@ void Get_ADC_Measurements(int8_t *out_temp, uint16_t *out_batt_mv)
 
 	// 1. Povolení hodin
 	__HAL_RCC_ADC_CLK_ENABLE();
-	__HAL_RCC_GPIOA_CLK_ENABLE(); // Port pro baterii (uprav dle tvé desky)
+	__HAL_RCC_GPIOA_CLK_ENABLE(); // Port pro akumulátor
 
-	// 2. Konfigurace pinu pro baterii (PA3 - Channel 4)
+	// 2. Konfigurace pinu pro baterii (PA1 - Channel 6)
 	GPIO_InitTypeDef GPIO_InitStruct = {0};
-	GPIO_InitStruct.Pin = GPIO_PIN_3;
+	GPIO_InitStruct.Pin = GPIO_PIN_1;
 	GPIO_InitStruct.Mode = GPIO_MODE_ANALOG;
 	GPIO_InitStruct.Pull = GPIO_NOPULL;
 	HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
@@ -234,7 +226,7 @@ void Get_ADC_Measurements(int8_t *out_temp, uint16_t *out_batt_mv)
 		sConfig.OffsetNumber = ADC_OFFSET_NONE;
 		sConfig.Offset = 0;
 
-		// --- MĚŘENÍ 1: INTERNÍ TEPLOTA ---
+		// Měření 1: interní teplota
 		sConfig.Channel = ADC_CHANNEL_TEMPSENSOR;
 		if (HAL_ADC_ConfigChannel(&hadc1, &sConfig) == HAL_OK)
 		{
@@ -250,7 +242,7 @@ void Get_ADC_Measurements(int8_t *out_temp, uint16_t *out_batt_mv)
 			}
 		}
 
-		// --- MĚŘENÍ 2: NAPĚTÍ BATERIE ---
+		// Měření 2: Napětí akumulátoru
 		sConfig.Channel = ADC_CHANNEL_4; // PA3 = CH4
 		if (HAL_ADC_ConfigChannel(&hadc1, &sConfig) == HAL_OK)
 		{
@@ -259,7 +251,7 @@ void Get_ADC_Measurements(int8_t *out_temp, uint16_t *out_batt_mv)
 			{
 				if (HAL_ADC_PollForConversion(&hadc1, 100) == HAL_OK) {
 					uint32_t raw_val = HAL_ADC_GetValue(&hadc1);
-					*out_batt_mv = (raw_val * 3300) / 4095; // (x2 pokud máš dělič)
+					*out_batt_mv = (raw_val * 3300) / 4095;
 				}
 				HAL_ADC_Stop(&hadc1);
 			}
@@ -271,17 +263,13 @@ void Get_ADC_Measurements(int8_t *out_temp, uint16_t *out_batt_mv)
 	__HAL_RCC_ADC_CLK_DISABLE();
 }
 
-// -----------------------------------------------------------------------------
-// ZPRACOVÁNÍ PŘIJATÝCH DAT (Zde chytáme ty 3 byty od závodníka/konfigurátora)
-// -----------------------------------------------------------------------------
+// Zpracování přijatých dat (3 byty od závodníka)
 void APP_MAC_ReceiveData(void)
 {
 	// Pokud Kontrola chytí 3bajtový paket (Odpověď od Závodníka)
 	if (g_DataInd.msdu_length == 3)
 	{
-		// =====================================================================
-		// STAVOVÝ AUTOMAT: PROBUZENÍ Z VÍKENDOVÉHO REŽIMU
-		// =====================================================================
+		// STAVOVÝ AUTOMAT: Probuzení z režimu spánku
 		if (current_state == STATE_IDLE_MAC) {
 			current_state = STATE_ACTIVE_MAC;
 			APP_DBG(">>> AUTOMAT: Kontrola probuzena do ZAVODNIHO rezimu!");
@@ -295,9 +283,7 @@ void APP_MAC_ReceiveData(void)
 
 		if (device_type == 0x00)
 		{
-			// =================================================================
 			// ANTI-SPAM FILTR (Ochrana proti Burst přenosu od Závodníka)
-			// =================================================================
 			static uint32_t last_saved_id = 0xFFFFFFFF;
 			static uint32_t last_saved_tick = 0;
 
@@ -312,9 +298,7 @@ void APP_MAC_ReceiveData(void)
 			last_saved_id = received_id_or_hash;
 			last_saved_tick = HAL_GetTick();
 
-			// =================================================================
 			// A) STANDARDNÍ ZÁVODNÍK -> ZÁPIS DO PAMĚTI
-			// =================================================================
 			APP_DBG(">>> ZAVODNIK ORAZIL! ID: %lu", received_id_or_hash);
 
 			// Získání aktuálního času pro záznam
@@ -346,20 +330,16 @@ void APP_MAC_ReceiveData(void)
 			// Vhodíme 3 bajty závodníka a čas do FIFO fronty!
 			NBIOT_FIFO_Push(payload, unix_time);
 
-			// =================================================================
-			// ASYNCHRONNÍ PÍPNUTÍ A BLIKNUTÍ (Čisté využití hotového API)
-			// =================================================================
-			System_Signalize_Start(4); // Pípá a bliká po dobu 1 vteřiny
+			// Asynchronní pípání a blikání
+			System_Signalize_Start(4);
 
 		}
 		else if (device_type == 0x01)
 		{
-			// =================================================================
 			// B) KONFIGURAČNÍ JEDNOTKA -> PŘEPNUTÍ DO BLE
-			// =================================================================
 			APP_DBG(">>> DETEKOVAN KONFIGURATOR! Hash ze vzduchu: %lu", received_id_or_hash);
 
-			// Přečteme si očekávaný hash z Flash paměti (maskujeme na 22 bitů pro jistotu)
+			// Přečtení očekávaného hash z Flash paměti (maskujeme na 22 bitů pro jistotu)
 			uint32_t expected_hash = DEVICE_CONFIG->hash_device & 0x3FFFFF;
 
 			if (received_id_or_hash == expected_hash)
@@ -386,10 +366,10 @@ MAC_Status_t APP_MAC_mcpsDataIndCb( const  MAC_dataInd_t * pDataInd )
 {
 	// FIREWALL: Bezpečnostní kontrola délky (Bod 4)
 	// Pokud je délka paketu nesmyslná (větší než náš standardní 128 bytový buffer
-	// nebo úplně prázdná), paket okamžitě bez milosti zahodíme!
+	// nebo úplně prázdná), paket je zahozen
 	if (pDataInd->msdu_length == 0 || pDataInd->msdu_length > 127)
 	{
-		return MAC_SUCCESS; // Tváříme se, že je vše OK, ale data ignorujeme
+		return MAC_SUCCESS; // Ignorování dat
 	}
 
 	if (FrameOnGoing == FALSE)
@@ -397,19 +377,16 @@ MAC_Status_t APP_MAC_mcpsDataIndCb( const  MAC_dataInd_t * pDataInd )
 		FrameOnGoing = TRUE;
 		memcpy(&g_DataInd, pDataInd, sizeof(MAC_dataInd_t));
 
-		// --- KRITICKÁ OPRAVA: BEZPEČNÁ ZÁLOHA PAYLOADU ---
+		// Bezpečná záloha payloadu
 		memcpy(rx_payload_safe_kontrola, pDataInd->msduPtr, pDataInd->msdu_length);
 		g_DataInd.msduPtr = rx_payload_safe_kontrola; // Přesměrování ukazatele
-		// -------------------------------------------------
 
 		UTIL_SEQ_SetTask(1 << CFG_TASK_RECEIVE_DATA, CFG_SCH_PRIO_0);
 	}
 	return MAC_SUCCESS;
 }
 
-// -----------------------------------------------------------------------------
-// CALLBACK: PAKET BYL ODESLÁN (ZDE RESTARTUJEME ČASOVAČ PRO DALŠÍ)
-// -----------------------------------------------------------------------------
+// CALLBACK: Paket byl odeslán, recet časovače pro další
 MAC_Status_t APP_MAC_mcpsDataCnfCb( const  MAC_dataCnf_t * pDataCnf )
 {
 	// Paket vyletěl z antény, otevíráme bránu pro další!
@@ -418,34 +395,27 @@ MAC_Status_t APP_MAC_mcpsDataCnfCb( const  MAC_dataCnf_t * pDataCnf )
 	return MAC_SUCCESS;
 }
 
-// Zbytek callbacku, ktere Kontrola nepotrebuje vyrizovat...
+// Zbytek callbacku, které Kontrola nepotřebuje vyřizovat
 MAC_Status_t APP_MAC_mlmeAssociateCnfCb(const MAC_associateCnf_t * pAssociateCnf) { return MAC_NOT_IMPLEMENTED_STATUS; }
 MAC_Status_t APP_MAC_mlmeAssociateIndCb(const MAC_associateInd_t * pAssociateInd) { return MAC_NOT_IMPLEMENTED_STATUS; }
 MAC_Status_t APP_MAC_mlmeBeaconNotifyIndCb(const MAC_beaconNotifyInd_t * pBeaconNotifyInd) { return MAC_NOT_IMPLEMENTED_STATUS; }
-// ... (Zde muzes klidne nechat smazane nebo jako NOT_IMPLEMENTED vsechny ostatni callbacky z puvodniho souboru)
 
-// =============================================================================
-// OBSLUHA MAGNETU (TLAČÍTKO SW2) - PŘECHOD DO ZÁVODNÍHO REŽIMU
-// =============================================================================
+// Obsluha Hallového senzoru - přechod do závodního režimu
 void APP_MAC_Magnet_Action(void)
 {
 	static uint32_t last_trigger_time = 0;
 	if (HAL_GetTick() - last_trigger_time < 500) return;
 	last_trigger_time = HAL_GetTick();
 
-	// Zvedáme stav POUZE pokud je Kontrola v IDLE (Standby)
+	// Zvedáme stav pouze pokud je Kontrola v IDLE (Standby)
 	if (current_state == STATE_IDLE_MAC) {
 		current_state = STATE_ACTIVE_MAC;
 		APP_DBG(">>> MAGNET: Kontrola probuzena do ZAVODNIHO rezimu! <<<");
 
-		// ---------------------------------------------------------
-		// 1. ZCELA USMRTIT BLE STACK (Uvolní hardwarový arbitr antény)
-		// ---------------------------------------------------------
+		// 1. Ukončení BLE stack (Uvolní hardwarový arbitr antény)
 		//APP_BLE_Stop();
 
-		// ---------------------------------------------------------
-		// 2. PROBUZENÍ PŘIJÍMAČE MAC VRSTVY (Aby Kontrola slyšela Závodníka)
-		// ---------------------------------------------------------
+		// 2. Probouzení přijímače MAC vrstvy (Aby Kontrola slyšela Závodníka)
 		MAC_setReq_t SetReq;
 		memset(&SetReq, 0x00, sizeof(MAC_setReq_t));
 		SetReq.PIB_attribute = g_MAC_RX_ON_WHEN_IDLE_c;
@@ -454,11 +424,9 @@ void APP_MAC_Magnet_Action(void)
 		MAC_MLMESetReq( &SetReq );
 		UTIL_SEQ_WaitEvt( 1U << CFG_EVT_SET_CNF ); // Zde je WaitEvt bezpečný (standardní ST parametr)
 
-		// ---------------------------------------------------------
-		// 3. VYNUCENÍ SPRÁVNÉHO KANÁLU (Jistota po resetu)
-		// ---------------------------------------------------------
+		// 3. Vynucení správného kanálu (Jistota po resetu)
 		memset(&SetReq, 0x00, sizeof(MAC_setReq_t));
-		SetReq.PIB_attribute = 0x21; // OPRAVA: 0x21 je standardní IEEE ID pro macLogicalChannel
+		SetReq.PIB_attribute = 0x21; // 0x21 je standardní IEEE ID pro macLogicalChannel
 		PIB_Value = 26; // DEMO_CHANNEL
 		SetReq.PIB_attribute_valuePtr = &PIB_Value;
 		MAC_MLMESetReq( &SetReq );

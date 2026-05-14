@@ -48,14 +48,14 @@
 #include <stdio.h>  // Pro funkci snprintf
 #include "app_entry.h"
 
-// Tady si definuješ fyzickou revizi desky a typ
+// HW Revize a typ
 #define HW_REV_BASE "Rev 2.1 Závodník"
 
 // Propojení s automaticky generovaným souborem version.c
 extern const char fw_ver[];
 extern const char git_hash[];
 
-// Globální pole pro finální hardwarovou verzi (vyhrazujeme např. 50 bajtů)
+// Globální pole pro finální hardwarovou verzi
 char hw_ver_full[32];
 
 /* Private typedef -----------------------------------------------------------*/

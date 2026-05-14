@@ -1,3 +1,24 @@
+/* USER CODE BEGIN Header */
+/**
+  ******************************************************************************
+ * @file    app_nbiot.c
+ * @author  Josef Nagy
+ * @brief
+  ******************************************************************************
+  * @attention
+  *
+  * Copyright (c) 2026 Josef Nagy.
+  * All rights reserved.
+  *
+  * This software is licensed under terms that can be found in the LICENSE file
+  * in the root directory of this software component.
+  * If no LICENSE file comes with this software, it is provided AS-IS.
+  *
+  ******************************************************************************
+  */
+/* USER CODE END Header */
+
+
 #include "app_nbiot.h"
 #include "stm32_seq.h"
 #include "app_conf.h"
@@ -10,42 +31,35 @@
 #include <stdlib.h> // Pro funkci atoi()
 #include "p2p_server_app.h" // Pro System_Execute_Command
 
-// SMAZÁNO: extern uint16_t Get_Battery_Voltage(void);
-// PŘIDÁNO: Přístup k unifikovanému měření z MAC vrstvy
-extern void Get_ADC_Measurements(int8_t *out_temp, uint16_t *out_batt_mv);
+// ===== Defines ==========================================================================
 
-// --- NOVÉ PROMĚNNÉ PRO STATUS A BATERII ---
+// HARDWARE DEFINICE (Dle výsledného fyzického rozhraní desky)
+#define NBIOT_TX_PORT           GPIOC
+#define NBIOT_TX_PIN            GPIO_PIN_1   // LPUART1 TX
+#define NBIOT_RX_PORT           GPIOC
+#define NBIOT_RX_PIN            GPIO_PIN_0   // LPUART1 RX
+#define NBIOT_PWRKEY_PORT       GPIOC
+#define NBIOT_PWRKEY_PIN        GPIO_PIN_3   // Pin pro zapnutí modulu
+#define NBIOT_RX_BUFFER_SIZE    256          // Velikost kruhového bufferu pro odpovědi modulu
+
+// Kapacita pro 64 ražení (bohatě stačí pro případ, že modul chvíli hledá síť)
+#define NBIOT_FIFO_SIZE 64
+
+// ===== Global variables =================================================================
+
+// Status a akumulátor
 static uint8_t last_csq = 99;         // 99 znamená "Neznámý signál"
 static bool is_nbiot_dead = false;    // Vlajka pro trvalé vypnutí modulu
 static uint8_t NbiotHeartbeatTimerId; // Časovač pro pravidelný Status
-
-
-// =============================================================================
-// HARDWARE DEFINICE (Uprav podle fyzického zapojení desky!)
-// =============================================================================
-#define NBIOT_TX_PORT           GPIOA
-#define NBIOT_TX_PIN            GPIO_PIN_2   // LPUART1 TX
-#define NBIOT_RX_PORT           GPIOA
-#define NBIOT_RX_PIN            GPIO_PIN_3   // LPUART1 RX
-
-#define NBIOT_PWRKEY_PORT       GPIOB
-#define NBIOT_PWRKEY_PIN        GPIO_PIN_5   // Pin pro zapnutí modulu
-
-#define NBIOT_RX_BUFFER_SIZE    256          // Velikost kruhového bufferu pro odpovědi modulu
 
 // Globální handlery pro HAL
 UART_HandleTypeDef hlpuart1;
 DMA_HandleTypeDef hdma_lpuart1_rx;
 
-// Buffer, kam nám bude DMA sypat data bez účasti procesoru
+// Buffer, kam bude DMA dávat data bez účasti procesoru
 uint8_t nbiot_rx_buffer[NBIOT_RX_BUFFER_SIZE];
 
-// Dopředná deklarace funkcí
-void NBIOT_PowerOn_Pulse(void);
-
-// =============================================================================
 // STAVY NBIOT AUTOMATU
-// =============================================================================
 typedef enum {
 	NB_STATE_SLEEP = 0,     // Modul spí, fronta je prázdná
 	NB_STATE_WAKING_UP,     // Čekáme na nabootování modulu (hláška RDY)
@@ -54,7 +68,7 @@ typedef enum {
 	NB_STATE_SENDING,       // Fyzické odesílání 10 bajtů z fronty
 	NB_STATE_REQ_SEND,      // Čekáme na '>' z modulu
 	NB_STATE_WAITING_ACK,    // Čekáme, až nám náš server odpoví bajtem 0x01
-	NB_STATE_READ_DOWNLINK,  // <--- PŘIDÁNO (Čtení dat ze socketu)
+	NB_STATE_READ_DOWNLINK,  // Čtení dat ze socketu
 	NB_STATE_GET_CSQ
 } NBIOT_State_t;
 
@@ -63,6 +77,35 @@ static uint16_t udp_payload_len = 0;
 
 static NBIOT_State_t current_nb_state = NB_STATE_SLEEP;
 static NBIOT_PunchRecord_t active_record; // Záznam, který se zrovna pokoušíme odeslat
+
+typedef struct {
+	NBIOT_PunchRecord_t buffer[NBIOT_FIFO_SIZE];
+	volatile uint16_t head;
+	volatile uint16_t tail;
+	volatile uint16_t count;
+} NBIOT_FIFO_t;
+
+static NBIOT_FIFO_t nbiot_fifo;
+
+// Časovače a  stavové proměnné pro BATCHING a BACKOFF
+static uint8_t NbiotBackoffTimerId;
+static uint8_t NbiotBatchTimerId;
+static uint8_t NbiotPollTimerId; // Časovač pro dotazování (AT+CGATT?)
+
+static bool is_backoff_active = false; // Běží 5minutová penalizace?
+static bool is_batch_active = false;   // Běží 10vteřinové okno pro nasbírání dat?
+static uint8_t cgatt_retries = 0;      // Kolikrát jsme se marně ptali na síť
+
+// ===== External variables ===============================================================
+// ===== External functions ===============================================================
+
+extern void Get_ADC_Measurements(int8_t *out_temp, uint16_t *out_batt_mv);
+
+// ===== Function declaration =============================================================
+
+void NBIOT_PowerOn_Pulse(void);
+
+// ===== Function definition ==============================================================
 
 // Pomocná funkce pro rychlé odeslání AT příkazu (přidá \r\n automaticky)
 static void NBIOT_Send_AT(const char *cmd) {
@@ -74,28 +117,6 @@ static void NBIOT_Send_AT(const char *cmd) {
 	HAL_UART_Transmit(&hlpuart1, (uint8_t*)tx_buf, strlen(tx_buf), 100);
 }
 
-// Kapacita pro 64 ražení (bohatě stačí pro případ, že modul chvíli hledá síť)
-#define NBIOT_FIFO_SIZE 64
-
-typedef struct {
-	NBIOT_PunchRecord_t buffer[NBIOT_FIFO_SIZE];
-	volatile uint16_t head;
-	volatile uint16_t tail;
-	volatile uint16_t count;
-} NBIOT_FIFO_t;
-
-static NBIOT_FIFO_t nbiot_fifo;
-
-// =============================================================================
-// ČASOVAČE A STAVOVÉ PROMĚNNÉ PRO BATCHING A BACKOFF
-// =============================================================================
-static uint8_t NbiotBackoffTimerId;
-static uint8_t NbiotBatchTimerId;
-static uint8_t NbiotPollTimerId; // Časovač pro dotazování (AT+CGATT?)
-
-static bool is_backoff_active = false; // Běží 5minutová penalizace?
-static bool is_batch_active = false;   // Běží 10vteřinové okno pro nasbírání dat?
-static uint8_t cgatt_retries = 0;      // Kolikrát jsme se marně ptali na síť
 
 static void Timer_Heartbeat_Cb(void) {
 	// Pokud už jsme se kvůli baterii trvale vypnuli, Heartbeat neposíláme
@@ -142,9 +163,7 @@ static void Timer_Poll_Cb(void) {
 	}
 }
 
-// =============================================================================
 // BEZPEČNOSTNÍ HASH (Anti-Spoofing pro UDP)
-// =============================================================================
 static uint32_t Calculate_Payload_Hash(uint8_t *data, uint16_t len, uint32_t secret_key) {
 	// Inicializujeme hash naším tajným PINem z Flash paměti
 	uint32_t hash = secret_key;
@@ -165,7 +184,7 @@ void NBIOT_FIFO_Init(void) {
 	nbiot_fifo.count = 0;
 }
 
-// VLOŽENÍ DO FRONTY (Voláno z rychlého MAC přerušení)
+// Vložení do fronty (Voláno z rychlého MAC přerušení)
 bool NBIOT_FIFO_Push(uint8_t *runner_raw, uint32_t timestamp) {
 	// Zakážeme na zlomek mikrosekundy přerušení pro bezpečný zápis
 	uint32_t primask_bit = __get_PRIMASK();
@@ -217,9 +236,7 @@ uint16_t NBIOT_FIFO_GetCount(void) {
 	return nbiot_fifo.count;
 }
 
-// =============================================================================
 // HLAVNÍ NBIOT TASK (Asynchronní stavový automat)
-// =============================================================================
 void NBIOT_Process_Task(void)
 {
 	switch(current_nb_state)
@@ -345,7 +362,7 @@ void NBIOT_Process_Task(void)
 						udp_payload[udp_payload_len++] = (my_control_id >> 8) & 0xFF;
 						udp_payload[udp_payload_len++] = my_control_id & 0xFF;
 
-						// NOVÉ: Čteme aktuální data z ADC
+						// Čteme aktuální data z ADC
 						int8_t temp_c;
 						uint16_t bat_mv;
 						Get_ADC_Measurements(&temp_c, &bat_mv);
@@ -381,19 +398,17 @@ void NBIOT_Process_Task(void)
 					}
 				}
 
-				// =================================================================
-				// VIP: PŘIDÁNÍ BEZPEČNOSTNÍHO PODPISU (HASH)
-				// =================================================================
+				// PŘIDÁNÍ BEZPEČNOSTNÍHO PODPISU (HASH)
 				// Vypočítáme podpis z aktuálních dat, klíčem je náš tajný PIN
 				uint32_t packet_hash = Calculate_Payload_Hash(udp_payload, udp_payload_len, DEVICE_CONFIG->hash_device);
 
-				// Přilepíme 4 bajty podpisu na úplný konec zprávy
+				// Přidáme 4 bajty podpisu na úplný konec zprávy
 				udp_payload[udp_payload_len++] = (packet_hash >> 24) & 0xFF;
 				udp_payload[udp_payload_len++] = (packet_hash >> 16) & 0xFF;
 				udp_payload[udp_payload_len++] = (packet_hash >> 8)  & 0xFF;
 				udp_payload[udp_payload_len++] = packet_hash & 0xFF;
 
-								// Odeslání do modulu Quectel
+				// Odeslání do modulu Quectel
 				char cmd[32];
 				snprintf(cmd, sizeof(cmd), "AT+QISEND=0,%d", udp_payload_len);
 				NBIOT_Send_AT(cmd);
@@ -451,19 +466,17 @@ void NBIOT_Process_Task(void)
 					char *data_start = strchr(qird_ptr, '\n');
 
 					if (data_start != NULL) {
-						data_start++; // Posuneme ukazatel o 1 znak za ten Enter
+						data_start++; // Posuneme ukazatel o 1 znak za Enter
 
-						// =========================================================
-						// MAGIE ZDE: Surová data hodíme do stejného procesoru jako BLE!
+						// Surová data dáme do stejného procesoru jako BLE!
 						// Parametr '1' znamená, že zdroj je NB-IoT.
-						// =========================================================
 						System_Execute_Command((uint8_t*)data_start, downlink_len, 1);
 					}
 				} else {
 					APP_DBG("NBIOT: Server sice odpovedel, ale neposlal zadny prikaz.");
 				}
 
-				// Vše je hotovo, teď teprve můžeme jít klidně spát!
+				// Vše je hotovo, teď teprve můžeme jít spát
 				nbiot_rx_buffer[0] = '\0';
 				APP_DBG("NBIOT: Uspavam modul a spoustim BATCH (10s)");
 				NBIOT_Send_AT("AT+QPOWD=1");
@@ -479,19 +492,17 @@ void NBIOT_Process_Task(void)
 	}
 }
 
-// =============================================================================
-// INICIALIZACE LPUART1 A DMA PRO NB-IOT
-// =============================================================================
+// Inicializace LPUART1 A DMA pro NB-IoT
 void NBIOT_Hardware_Init(void)
 {
-	// 1. POVOLENÍ HODIN (Clocks)
+	// 1. Povolení hodin (Clocks)
 	__HAL_RCC_LPUART1_CLK_ENABLE();
 	__HAL_RCC_GPIOA_CLK_ENABLE();
 	__HAL_RCC_GPIOB_CLK_ENABLE();
 	__HAL_RCC_DMAMUX1_CLK_ENABLE();
 	__HAL_RCC_DMA1_CLK_ENABLE();
 
-	// 2. KONFIGURACE PINU PWRKEY (Výstupní pin pro zapínání modulu)
+	// 2. Konfigurace pinu PSM_EINT (Výstupní pin pro zapínání modulu)
 	GPIO_InitTypeDef GPIO_InitStruct = {0};
 	GPIO_InitStruct.Pin = NBIOT_PWRKEY_PIN;
 	GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP; // Push-Pull
@@ -499,7 +510,7 @@ void NBIOT_Hardware_Init(void)
 	GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
 	HAL_GPIO_Init(NBIOT_PWRKEY_PORT, &GPIO_InitStruct);
 
-	// Výchozí stav: PWRKEY uvolněný (obvykle HIGH, modul má vnitřní pull-up)
+	// Výchozí stav: PSM_EINT uvolněný (obvykle HIGH, modul má vnitřní pull-up)
 	HAL_GPIO_WritePin(NBIOT_PWRKEY_PORT, NBIOT_PWRKEY_PIN, GPIO_PIN_SET);
 
 	// 3. KONFIGURACE PINŮ LPUART1 (TX a RX)
@@ -510,7 +521,7 @@ void NBIOT_Hardware_Init(void)
 	GPIO_InitStruct.Alternate = GPIO_AF8_LPUART1; // AF8 je pro LPUART na STM32WB
 	HAL_GPIO_Init(NBIOT_TX_PORT, &GPIO_InitStruct);
 
-	// 4. KONFIGURACE LPUART1 (9600 Baudrate je pro NB-IoT nejspolehlivější a nejúspornější)
+	// 4. Konfigurace LPUART1 (9600 Baudrate je pro NB-IoT nejspolehlivější a nejúspornější)
 	hlpuart1.Instance = LPUART1;
 	hlpuart1.Init.BaudRate = 9600;
 	hlpuart1.Init.WordLength = UART_WORDLENGTH_8B;
@@ -524,7 +535,7 @@ void NBIOT_Hardware_Init(void)
 			APP_DBG("CHYBA: NBIOT LPUART1 Init selhal!");
 	}
 
-	// 5. KONFIGURACE DMA PRO PŘÍJEM (RX)
+	// 5. Konfigurace DMA pro příjem (RX)
 	hdma_lpuart1_rx.Instance = DMA1_Channel1; // Použijeme volný kanál 1
 	hdma_lpuart1_rx.Init.Request = DMA_REQUEST_LPUART1_RX; // Propojení DMAMUX
 	hdma_lpuart1_rx.Init.Direction = DMA_PERIPH_TO_MEMORY;
@@ -532,20 +543,20 @@ void NBIOT_Hardware_Init(void)
 	hdma_lpuart1_rx.Init.MemInc = DMA_MINC_ENABLE; // Zapisujeme do pole
 	hdma_lpuart1_rx.Init.PeriphDataAlignment = DMA_PDATAALIGN_BYTE;
 	hdma_lpuart1_rx.Init.MemDataAlignment = DMA_MDATAALIGN_BYTE;
-	hdma_lpuart1_rx.Init.Mode = DMA_CIRCULAR; // MAGIE: Kruhový buffer (nikdy se nezastaví)
+	hdma_lpuart1_rx.Init.Mode = DMA_CIRCULAR; // Kruhový buffer (nikdy se nezastaví)
 	hdma_lpuart1_rx.Init.Priority = DMA_PRIORITY_LOW;
 	if (HAL_DMA_Init(&hdma_lpuart1_rx) != HAL_OK) {
 			APP_DBG("CHYBA: NBIOT DMA Init selhal!");
 	}
 	__HAL_LINKDMA(&hlpuart1, hdmarx, hdma_lpuart1_rx);
 
-	// 6. POVOLENÍ PŘERUŠENÍ
+	// 6. Povolení přerušení
 	HAL_NVIC_SetPriority(DMA1_Channel1_IRQn, 5, 0);
 	HAL_NVIC_EnableIRQ(DMA1_Channel1_IRQn);
 	HAL_NVIC_SetPriority(LPUART1_IRQn, 5, 0);
 	HAL_NVIC_EnableIRQ(LPUART1_IRQn);
 
-	// 7. SPUŠTĚNÍ ASYNCHRONNÍHO PŘÍJMU (IDLE LINE DETECTION)
+	// 7. Spuštění assynchroního příjmu (IDLE LINE DETECTION)
 	HAL_UARTEx_ReceiveToIdle_DMA(&hlpuart1, nbiot_rx_buffer, NBIOT_RX_BUFFER_SIZE);
 
 	UTIL_SEQ_RegTask(1 << CFG_TASK_NBIOT_PROCESS, UTIL_SEQ_RFU, NBIOT_Process_Task);
@@ -555,7 +566,7 @@ void NBIOT_Hardware_Init(void)
 	HW_TS_Create(CFG_TIM_PROC_ID_ISR, &NbiotBatchTimerId, hw_ts_SingleShot, Timer_Batch_Cb);
 	HW_TS_Create(CFG_TIM_PROC_ID_ISR, &NbiotPollTimerId, hw_ts_SingleShot, Timer_Poll_Cb);
 
-	// --- NOVÝ ČASOVAČ PRO HEARTBEAT (STATUS) ---
+	// Nový časovač pro HEARTBEAT (STATUS) ---
 	HW_TS_Create(CFG_TIM_PROC_ID_ISR, &NbiotHeartbeatTimerId, hw_ts_SingleShot, Timer_Heartbeat_Cb);
 	// Rovnou ho poprvé nastartujeme, ať pošle první stavový paket za 1 hodinu (3 600 000 ms)
 	HW_TS_Start(NbiotHeartbeatTimerId, (uint32_t)(3600000ULL * 1000ULL / CFG_TS_TICK_VAL));
@@ -563,9 +574,7 @@ void NBIOT_Hardware_Init(void)
 	APP_DBG(">>> NBIOT HARDWARE: Inicializovan (LPUART1 + DMA). Cekam na data.");
 }
 
-// =============================================================================
-// OVLÁDÁNÍ NAPÁJENÍ (PWRKEY)
-// =============================================================================
+// Ovládání napájení (PSM_EINT)
 void NBIOT_PowerOn_Pulse(void)
 {
 	APP_DBG(">>> NBIOT: Posilam zapinaci pulz na PWRKEY...");
@@ -575,16 +584,14 @@ void NBIOT_PowerOn_Pulse(void)
 
 	// Potřebujeme držet LOW cca 500-1000 ms (Quectel specifikace)
 	// Protože toto voláme z našeho Sequencer Tasku (a ne z přerušení), můžeme bezpečně
-	// použít HAL_Delay. Během tohoto Delay MAC vrstva vESELE běží dál a ukládá do Flash!
+	// použít HAL_Delay. Během tohoto Delay MAC vrstva běží dál a ukládá do Flash
 	HAL_Delay(800);
 
 	// Uvolníme pin zpět na HIGH
 	HAL_GPIO_WritePin(NBIOT_PWRKEY_PORT, NBIOT_PWRKEY_PIN, GPIO_PIN_SET);
 }
 
-// =============================================================================
-// ZACHYCENÍ ODPOVĚDI OD MODULU (Voláno z hlubin HAL knihovny přes DMA)
-// =============================================================================
+// Zachycení odpovědi od modulu (Voláno z HAL knihovny přes DMA)
 void HAL_UARTEx_RxEventCallback(UART_HandleTypeDef *huart, uint16_t Size)
 {
 	if (huart->Instance == LPUART1)
@@ -596,9 +603,7 @@ void HAL_UARTEx_RxEventCallback(UART_HandleTypeDef *huart, uint16_t Size)
 			nbiot_rx_buffer[NBIOT_RX_BUFFER_SIZE - 1] = '\0';
 		}
 
-		// =========================================================
-		// OPRAVA: Čištění textu děláme, jen když nečekáme binární data!
-		// =========================================================
+		// Čištění textu děláme, jen když nečekáme binární data
 		if (current_nb_state != NB_STATE_READ_DOWNLINK) {
 			for(int i = 0; i < Size; i++) {
 				if (nbiot_rx_buffer[i] == '\r' || nbiot_rx_buffer[i] == '\n') nbiot_rx_buffer[i] = ' ';
@@ -624,9 +629,7 @@ void LPUART1_IRQHandler(void) {
 	HAL_UART_IRQHandler(&hlpuart1);
 }
 
-// =============================================================================
-// NÁSILNÉ VYPNUTÍ MODULU (Voláno při přechodu do BLE nebo Storage)
-// =============================================================================
+// Vypnutí modulu (Voláno při přechodu do BLE nebo Storage)
 void NBIOT_Force_Sleep(void) {
 	APP_DBG(">>> NBIOT: Vynucene vypnuti modulu (System jde spat) <<<");
 

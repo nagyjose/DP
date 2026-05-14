@@ -1,3 +1,23 @@
+/* USER CODE BEGIN Header */
+/**
+  ******************************************************************************
+ * @file    flash_logger.c
+ * @author  Josef Nagy
+ * @brief
+  ******************************************************************************
+  * @attention
+  *
+  * Copyright (c) 2026 Josef Nagy.
+  * All rights reserved.
+  *
+  * This software is licensed under terms that can be found in the LICENSE file
+  * in the root directory of this software component.
+  * If no LICENSE file comes with this software, it is provided AS-IS.
+  *
+  ******************************************************************************
+  */
+/* USER CODE END Header */
+
 
 #include "flash_logger.h"
 #include "dbg_trace.h"
@@ -6,15 +26,21 @@
 #include <stdbool.h>
 #include "stm32wbxx_hal.h"
 
-
-extern IWDG_HandleTypeDef hiwdg; // Potřebujeme sáhnout na psa v main.c
+// ===== Defines ==========================================================================
+// ===== Global variables =================================================================
 
 static uint32_t current_flash_ptr = LOGGER_START_ADDR;
 static uint16_t current_punch_index = 0;
 
-// =============================================================================
-// VÝPOČET CRC-32 (Standardní IEEE 802.3 polynom)
-// =============================================================================
+// ===== External variables ===============================================================
+
+extern IWDG_HandleTypeDef hiwdg; // Potřebujeme sáhnout na watchdog v main.c
+
+// ===== External functions ===============================================================
+// ===== Function declaration =============================================================
+// ===== Function definition ==============================================================
+
+// Výpočet CRC-32 (Standardní IEEE 802.3 polynom)
 static uint32_t Calculate_CRC32(uint8_t *data, uint32_t length)
 {
     uint32_t crc = 0xFFFFFFFF;
@@ -37,7 +63,7 @@ static void ErasePage(uint32_t page_address)
 	// Výpočet čísla stránky z adresy
 	uint32_t page_index = (page_address - 0x08000000) / 4096;
 
-	// VÝRAZNÝ LOG PŘI MAZÁNÍ
+	// Log při mazání
 	APP_DBG("--- FLASH: MAZANI STRANKY 0x%08X (Cislo: %lu) ---", page_address, page_index);
 
 	EraseInitStruct.TypeErase = FLASH_TYPEERASE_PAGES;
@@ -50,7 +76,7 @@ static void ErasePage(uint32_t page_address)
 	HAL_FLASH_Lock();
 }
 
-// 1. INICIALIZACE PŘI BOOTU
+// Inicializace při bootu
 void Logger_Init(void)
 {
 	uint32_t active_page_addr = LOGGER_START_ADDR;
@@ -105,17 +131,17 @@ void Logger_Init(void)
 	APP_DBG("LOGGER INIT: Aktivni stranka: 0x%08X, Zaznamu: %d", active_page_addr, current_punch_index);
 }
 
-// 2. DASHCAM ZÁPIS ORAŽENÍ (S automatickým mazáním starých dat)
+// Zápis oražení (S automatickým mazáním starých dat)
 void Logger_SavePunch_Kontrola(uint8_t* id_3bytes, uint8_t sub_sec, uint32_t unix_time)
 {
 	// Pokud jsme naplnili aktuální stránku (512 záznamů)
 	if (current_punch_index >= LOGGER_MAX_RECORDS_PP)
 	{
-		// Spočítáme si index stránky, kterou jsme PRÁVĚ DOPSALI
+		// Spočítáme si index stránky, kterou jsme právě dopsali
 		uint32_t current_page_offset = (current_flash_ptr - 8) - LOGGER_START_ADDR;
 		uint32_t current_page_index = current_page_offset / LOGGER_PAGE_SIZE;
 
-		// Stránka N+1 (Na kterou jdeme psát). TA UŽ JE BEZPEČNĚ SMAZANÁ!
+		// Stránka N+1 (Na kterou jdeme psát). Ta už je bezpečně smazaná
 		uint32_t next_page_index = (current_page_index + 1) % LOGGER_MAX_PAGES;
 		uint32_t next_page_addr = LOGGER_START_ADDR + (next_page_index * LOGGER_PAGE_SIZE);
 
@@ -123,7 +149,7 @@ void Logger_SavePunch_Kontrola(uint8_t* id_3bytes, uint8_t sub_sec, uint32_t uni
 		uint32_t barrier_page_index = (next_page_index + 1) % LOGGER_MAX_PAGES;
 		uint32_t barrier_page_addr = LOGGER_START_ADDR + (barrier_page_index * LOGGER_PAGE_SIZE);
 
-		// JEDNO JEDINÉ MAZÁNÍ (25 ms) -> Mažeme až tu bariéru před námi!
+		// Jedno jediné mazání (25 ms) -> Mažeme až tu bariéru před námi
 		ErasePage(barrier_page_addr);
 
 		current_flash_ptr = next_page_addr;
@@ -152,9 +178,7 @@ void Logger_SavePunch_Kontrola(uint8_t* id_3bytes, uint8_t sub_sec, uint32_t uni
 	APP_DBG("LOG ULOZEN -> Adr: 0x%08X | ID: %lu | Cas: %lu.%d s", saved_addr, runner_id, unix_time, sub_sec);
 }
 
-// =============================================================================
-// TOVÁRNÍ NASTAVENÍ KONTROLY A ZÁPIS DO FLASH
-// =============================================================================
+// Tovární nastavení kontroly a zápis do Flash
 static void EraseConfigPage(void)
 {
 	FLASH_EraseInitTypeDef EraseInitStruct;
@@ -178,7 +202,7 @@ static void Config_FactoryReset(void)
 	BeaconConfig_t def_cfg;
 	memset(&def_cfg, 0, sizeof(BeaconConfig_t));
 
-	// --- NAPLNĚNÍ VÝCHOZÍMI HODNOTAMI ---
+	// Naplnění výchozími hodnotami
 	def_cfg.magic_word = 0xCAFECAFE;
 	strcpy(def_cfg.hw_revision, "Rev 2.1 Kontrola");
 	strcpy(def_cfg.BLE_device_name, "KONTROLA_31");
@@ -197,18 +221,16 @@ static void Config_FactoryReset(void)
 
 	strcpy(def_cfg.team_owner, "Vychozi Oddil");
 
-	// --- VÝCHOZÍ NB-IOT KONFIGURACE ---
+	// Výchozí NB-IoT konfigurace
 	strcpy(def_cfg.nbiot_apn, "nbiot.vodafone.cz"); // Změň podle své budoucí SIM karty
 	strcpy(def_cfg.nbiot_server_ip, "8.8.8.8");     // Náš testovací Google DNS server
 	def_cfg.nbiot_server_port = 8080;
 
-	// =================================================================
-	// OPRAVA: Výpočet a uložení CRC-32 před zápisem!
-	// =================================================================
+	// Výpočet a uložení CRC-32 před zápisem
 	def_cfg.control_sum = 0; // Pro jistotu vynulujeme před výpočtem
 	def_cfg.control_sum = Calculate_CRC32((uint8_t*)&def_cfg, sizeof(BeaconConfig_t));
 
-	// --- ZÁPIS DO FLASH PAMĚTI ---
+	// Zápis do flash paměti
 	EraseConfigPage();
 
 	uint8_t *data_ptr = (uint8_t*)&def_cfg;
@@ -231,12 +253,10 @@ static void Config_FactoryReset(void)
 	APP_DBG("CONFIG: Tovarni nastaveni uspesne zapsano!");
 }
 
-// =============================================================================
-// HLAVNÍ INICIALIZACE A ZÁCHRANNÝ RESET (Voláno z main.c)
-// =============================================================================
+// Hlavní inicializace a záchranný reset (Voláno z main.c)
 void Config_Init(void)
 {
-	// 1. ZÁCHRANNÁ BRZDA: Kontrola tlačítka SW3 při startu desky
+	// Záchranná brzda: Kontrola tlačítka SW3 při startu desky -- pouze testovací verze
 	// Tlačítko je Active-Low (Při stisku vrací 0, v klidu 1)
 	if (BSP_PB_GetState(BUTTON_SW3) == 0)
 	{
@@ -253,7 +273,7 @@ void Config_Init(void)
 				HAL_Delay(100);
 				hold_time++;
 
-				// !!! KRITICKÉ: Nakrmíme psa, aby nás během držení nesežral !!!
+				// Watchdog doplnění
 				HAL_IWDG_Refresh(&hiwdg);
 
 				if(hold_time > 30) { // 30 * 100ms = 3 vteřiny
@@ -269,10 +289,7 @@ void Config_Init(void)
 		}
 	}
 
-	// =========================================================================
-	// 2. KONTROLA INTEGRITY PAMĚTI (Magic Word + CRC-32)
-	// =========================================================================
-
+	// 2. Kontrola integrity paměti (Magic Word + CRC-32)
 	// Zkopírujeme si obsah Flash do RAM, abychom s ním mohli pracovat
 	BeaconConfig_t temp_cfg;
 	memcpy(&temp_cfg, (void*)DEVICE_CONFIG, sizeof(BeaconConfig_t));
@@ -297,15 +314,10 @@ void Config_Init(void)
 	}
 }
 
-// =============================================================================
-// ROZHRANÍ PRO BLE TUNEL (Ukládání, Mazání, Vyčítání)
-// =============================================================================
-
+// Rozhraní pro tunel (Ukládání, Mazání, Vyčítání)
 void Config_Commit(BeaconConfig_t *new_cfg)
 {
-	// =================================================================
-	// OPRAVA: Výpočet a uložení CRC-32 před uložením do paměti!
-	// =================================================================
+  // Výpočet a uložení CRC-32 před uložením do paměti
 	new_cfg->control_sum = 0;
 	new_cfg->control_sum = Calculate_CRC32((uint8_t*)new_cfg, sizeof(BeaconConfig_t));
 
@@ -350,7 +362,6 @@ void System_FactoryResetAll(void)
 	NVIC_SystemReset();
 }
 
-// ZMĚNĚNO: parametr 'param' je nyní uint32_t! (Nezapomeň upravit i v hlavičce flash_logger.h)
 void Logger_GetDownloadData(uint8_t cmd, uint32_t param, uint8_t **start_ptr, uint32_t *len)
 {
 	uint32_t ptr = current_flash_ptr;

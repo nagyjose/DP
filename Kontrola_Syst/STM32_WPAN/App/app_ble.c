@@ -32,8 +32,8 @@
 #include "otp.h"
 #include "p2p_server_app.h"
 
-#include <string.h>    // PŘIDÁNO: Pro práci s textem (strlen, memcpy)
-#include "app_conf.h"  // PŘIDÁNO: Pro přístup k DEVICE_CONFIG
+#include <string.h>
+#include "app_conf.h"
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
@@ -903,8 +903,8 @@ static void Adv_Request(APP_BLE_ConnStatus_t NewStatus)
 		Max_Inter,
 		GAP_PUBLIC_ADDR,
 		NO_WHITE_LIST_USE, /* use white list */
-		local_name_size,   /* NAŠE DYNAMICKÁ VELIKOST */
-		local_name,        /* NAŠE DYNAMICKÉ JMÉNO */
+		local_name_size,   /* DYNAMICKÁ VELIKOST */
+		local_name,        /* DYNAMICKÉ JMÉNO */
 		sizeof(adv_data),
 		(uint8_t*) &adv_data,
 		0,

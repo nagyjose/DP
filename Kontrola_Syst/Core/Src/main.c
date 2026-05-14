@@ -45,19 +45,19 @@
 #include "stm32_seq.h"
 #include "dbg_trace.h"
 #include "flash_logger.h"
-#include <stdio.h>  // Pro funkci snprintf
+#include <stdio.h>
 #include "app_nbiot.h"
 #include "stm32wbxx_hal.h"
 
 
-// Tady si definuješ fyzickou revizi desky a typ
+// HW Revize a typ
 #define HW_REV_BASE "Rev 2.1 Kontrola"
 
 // Propojení s automaticky generovaným souborem version.c
 extern const char fw_ver[];
 extern const char git_hash[];
 
-// Globální pole pro finální hardwarovou verzi (vyhrazujeme např. 50 bajtů)
+// Globální pole pro finální hardwarovou verzi
 char hw_ver_full[32];
 
 /* Private typedef -----------------------------------------------------------*/
@@ -114,22 +114,23 @@ int main( void )
 
 	APP_Init( );
 
-	/* NÁŠ HARDWAROVÝ WATCHDOG (2 sekundy) */
+	// HW Watchdog
 	hiwdg.Instance = IWDG;
 	hiwdg.Init.Prescaler = IWDG_PRESCALER_32;  // 1 tik = 1 milisekunda
-	hiwdg.Init.Reload = 1000;                  // Pes kouše po 2000 ms (2 sekundy)
+	hiwdg.Init.Reload = 1000;                  // Perioda pro obnovení 1000 ms
 	hiwdg.Init.Window = 4095;
 	if (HAL_IWDG_Init(&hiwdg) != HAL_OK)
 	{
-		// Pokud se inicializace psa nepovede, natvrdo celou desku zrestartujeme sami.
+		// Pokud se inicializace watchdogu nepovede, je mcu zrestartován
 		NVIC_SystemReset();
 	}
 
+	// Zápis verze na základě version.c souboru do inicializace do flash
 	snprintf(hw_ver_full, sizeof(hw_ver_full), "%s [%s]", HW_REV_BASE, git_hash);
 
 	HAL_Delay(500);
 
-	Logger_Init(); // Najde, kde jsme před havárií přestali zapisovat
+	Logger_Init(); // Najde, kde byl před havárií ukončen zápis
 	Config_Init();
 	//NBIOT_FIFO_Init();
 
@@ -137,8 +138,7 @@ int main( void )
 	{
 		UTIL_SEQ_Run( UTIL_SEQ_DEFAULT );
 
-		// TADY KRMÍME PSA: Pokud se M4 zasekne uvnitř MAC knihovny,
-		// semyčka se zastaví, pes nedostane najíst a za 2 vteřiny systém zrestartuje.
+		// Watchdog feed
 		HAL_IWDG_Refresh(&hiwdg);
 	}
 }
@@ -371,18 +371,18 @@ void HAL_Delay(uint32_t Delay)
 
 void HW_USB_Clock_Init(void)
 {
-	// --- OPRAVA 1: ZAPNUTÍ NAPÁJENÍ USB TRANSCEIVERU ---
+	// Zapnutí napájení USB transceiveru
 	HAL_PWREx_EnableVddUSB();
 
   RCC_PeriphCLKInitTypeDef PeriphClkInitStruct = {0};
 
-  // 1. Zapnutí HSI48 Oscilátoru
+  //Zapnutí HSI48 Oscilátoru
   __HAL_RCC_HSI48_ENABLE();
 
   // Čekání na stabilizaci hodin
   while(__HAL_RCC_GET_FLAG(RCC_FLAG_HSI48RDY) == RESET) {}
 
-  // 2. Přesměrování 48MHz hodin do USB periferie
+  // Přesměrování 48MHz hodin do USB periferie
   PeriphClkInitStruct.PeriphClockSelection = RCC_PERIPHCLK_USB;
   PeriphClkInitStruct.UsbClockSelection = RCC_USBCLKSOURCE_HSI48;
   if (HAL_RCCEx_PeriphCLKConfig(&PeriphClkInitStruct) != HAL_OK)
@@ -390,10 +390,10 @@ void HW_USB_Clock_Init(void)
     Error_Handler(); // Zachycení fatální chyby hodin
   }
 
-  // 3. Povolení napájení pro USB periferii
+  // Povolení napájení pro USB periferii
   __HAL_RCC_USB_CLK_ENABLE();
 
-  // 4. Povolení přerušení v NVIC
+  // Povolení přerušení v NVIC
   HAL_NVIC_SetPriority(USB_LP_IRQn, 0, 0); // Vysoká priorita
   HAL_NVIC_EnableIRQ(USB_LP_IRQn);
 }

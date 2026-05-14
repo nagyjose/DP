@@ -20,16 +20,9 @@
 #include "usbd_conf.h"
 #include "usbd_def.h"
 
-extern void System_Signalize_Start(uint8_t seconds);
-extern void Get_ADC_Measurements(int8_t *out_temp, uint16_t *out_batt_mv);
-extern void NBIOT_Force_Sleep(void);
+// ===== Defines ==========================================================================
 
-extern uint8_t CDC_Transmit_FS(uint8_t* Buf, uint16_t Len);
-
-// --- PŘIDÁNO: Dopředná deklarace naší nové funkce ---
-void System_Send_ACK(uint8_t *payload, uint8_t length, uint8_t source);
-
-// --- NAŠE UNIKÁTNÍ UUID (128-bit) ---
+// Unikátní UUID (128-bit)
 #define COPY_SERVICE_UUID(uuid_struct) { \
   (uuid_struct)[0]=0x19; (uuid_struct)[1]=0xed; (uuid_struct)[2]=0x82; (uuid_struct)[3]=0xae; \
   (uuid_struct)[4]=0xed; (uuid_struct)[5]=0x21; (uuid_struct)[6]=0x4c; (uuid_struct)[7]=0x9d; \
@@ -38,6 +31,10 @@ void System_Send_ACK(uint8_t *payload, uint8_t length, uint8_t source);
 
 #define COPY_RX_UUID(uuid_struct) { (uuid_struct)[12]=0x41; (uuid_struct)[13]=0xFE; }
 #define COPY_TX_UUID(uuid_struct) { (uuid_struct)[12]=0x42; (uuid_struct)[13]=0xFE; }
+
+#define CHUNK_MAX_SIZE 20 // Maximální velikost jedné rány (BLE MTU to bezpečně snese)
+
+// ===== Global variables =================================================================
 
 static uint16_t OrienteeringServiceHdle;
 static uint16_t RxCharHdle;
@@ -48,92 +45,115 @@ static bool sleep_pending = false;            // Čekáme na slušné odpojení?
 static uint8_t pending_disconnect_action = 0; // 0 = Nic, 1 = SLEEP, 2 = POWER_OFF
 static uint8_t DisconnectTimerId;
 
-// Callback časovače pouze probudí finální Task
-static void DisconnectTimer_Callback(void) {
-    UTIL_SEQ_SetTask(1 << CFG_TASK_EXECUTE_DISCONNECT, CFG_SCH_PRIO_0);
-}
-void Execute_Disconnect_Task(void); // <--- Přidej tento řádek nahoru k definicím
+// Kráječ dat
+static uint8_t *chunk_ptr = NULL;        // Ukazatel na to, co zrovna odesíláme
+static uint32_t chunk_rem_len = 0;       // Kolik bajtů nám ještě zbývá odeslat
+static uint8_t  chunk_active_cmd = 0;    // Jaký příkaz se zrovna vykonává
 
-// =============================================================================
+// Proměnné pro relaci (SESSION & STAGING)
+static bool is_unlocked = false;           // Stav zámku (Odemčeno / Zamčeno)
+static BeaconConfig_t staged_config;       // RAM kopie konfigurace pro úpravy
+
+// KRYPTOGRAFIE (Challenge-Response)
+static uint32_t current_challenge = 0; // Paměť pro aktuálně vygenerovanou výzvu
+
+
 // SEZNAM HLAVNÍCH BLE PŘÍKAZŮ
-// =============================================================================
 typedef enum {
-    // --- Bezpečnost a Relace ---
-    CMD_UNLOCK              = 0x05,
-    CMD_LOCK                = 0x06,
-    CMD_VERIFY_HASH         = 0x07,
+	// --- Bezpečnost a Relace ---
+	CMD_UNLOCK              = 0x05,
+	CMD_LOCK                = 0x06,
+	CMD_VERIFY_HASH         = 0x07,
 
-    // --- Čtení dat ---
-    CMD_READ_CONFIG         = 0x10,
-		CMD_GET_STATUS          = 0x11, // Rychlý status (Bez logů)
-		CMD_GET_BATTERY         = 0x14, // <--- PŘIDÁNO: Samostatný stav baterie
-		CMD_DOWNLOAD_ALL        = 0x21, // Vše (od nejstaršího po nejnovější)
-		CMD_DOWNLOAD_FROM_TIME  = 0x23, // PŘIDÁNO: Od zadaného UNIX času
-		CMD_DOWNLOAD_LAST_N     = 0x24, // PŘIDÁNO: Posledních N záznamů
+	// --- Čtení dat ---
+	CMD_READ_CONFIG         = 0x10,
+	CMD_GET_STATUS          = 0x11, // Rychlý status (Bez logů)
+	CMD_GET_BATTERY         = 0x14, // Samostatný stav baterie
+	CMD_DOWNLOAD_ALL        = 0x21, // Vše (od nejstaršího po nejnovější)
+	CMD_DOWNLOAD_FROM_TIME  = 0x23, // Od zadaného UNIX času
+	CMD_DOWNLOAD_LAST_N     = 0x24, // Posledních N záznamů
 
-    // --- Zápis do Konfigurace (Staging) ---
-    CMD_STAGE_PARAM         = 0x12,
-    CMD_COMMIT_CONFIG       = 0x13,
+	// --- Zápis do Konfigurace (Staging) ---
+	CMD_STAGE_PARAM         = 0x12,
+	CMD_COMMIT_CONFIG       = 0x13,
 
-    // --- Nástroje ---
-    CMD_IDENTIFY            = 0x40,
-		CMD_SYNC_TIME						= 0x30,
-		CMD_SLEEP               = 0x51,  // PŘIDÁNO: Příkaz pro návrat do MAC
-		CMD_POWER_OFF           = 0x52,  // PŘIDÁNO: Tvrdé vypnutí do STORAGE
+	// --- Nástroje ---
+	CMD_IDENTIFY            = 0x40,
+	CMD_SYNC_TIME						= 0x30,
+	CMD_SLEEP               = 0x51,  // Příkaz pro návrat do MAC
+	CMD_POWER_OFF           = 0x52,  // Tvrdé vypnutí do STORAGE
 
-    // --- Mazání a Resety ---
-    CMD_RESET_CONFIG        = 0x97,
-    CMD_RESET_ALL           = 0x98,
-    CMD_FORMAT_HISTORY      = 0x99
+	// --- Mazání a Resety ---
+	CMD_RESET_CONFIG        = 0x97,
+	CMD_RESET_ALL           = 0x98,
+	CMD_FORMAT_HISTORY      = 0x99
 } BLE_Command_t;
 
-// =============================================================================
 // SEZNAM PARAMETRŮ PRO ÚPRAVU KONFIGURACE (Pro příkaz 0x12)
-// =============================================================================
 typedef enum {
-    // --- Základní informace ---
-    PARAM_BLE_DEVICE_NAME   = 0x01,
-    PARAM_HASH_DEVICE       = 0x02,
+	// --- Základní informace ---
+	PARAM_BLE_DEVICE_NAME   = 0x01,
+	PARAM_HASH_DEVICE       = 0x02,
 
-    // --- Vysílané informace (Maják) ---
-    PARAM_STAT_DEVICE_TYPE  = 0x03, // 12bit ID Kontroly (CLEAR, START, atd.)
-    PARAM_REQ_RSSI          = 0x04,
-    PARAM_EVENT_NATION      = 0x05,
-    PARAM_EVENT_ID          = 0x06,
+	// --- Vysílané informace (Maják) ---
+	PARAM_STAT_DEVICE_TYPE  = 0x03, // 12bit ID Kontroly (CLEAR, START, atd.)
+	PARAM_REQ_RSSI          = 0x04,
+	PARAM_EVENT_NATION      = 0x05,
+	PARAM_EVENT_ID          = 0x06,
 
-    // --- Nastavovací parametry ---
-    PARAM_BEACON_PERIOD_MS  = 0x07,
-    PARAM_BEACON_PERIOD_LP  = 0x08,
-    PARAM_BUZZER_ONOFF      = 0x09,
-    PARAM_TX_POWER          = 0x0A,
-    PARAM_BAT_ALERT_THRESH  = 0x0B,
+	// --- Nastavovací parametry ---
+	PARAM_BEACON_PERIOD_MS  = 0x07,
+	PARAM_BEACON_PERIOD_LP  = 0x08,
+	PARAM_BUZZER_ONOFF      = 0x09,
+	PARAM_TX_POWER          = 0x0A,
+	PARAM_BAT_ALERT_THRESH  = 0x0B,
 
-    // --- Informace o vlastníkovi (Oddíl) ---
-    PARAM_TEAM_OWNER        = 0x0C,
-    PARAM_TEAM_SHORTCUT     = 0x0D,
-    PARAM_TEAM_NATION       = 0x0E,
-    PARAM_TEAM_LEADER       = 0x0F,
-    PARAM_TEAM_EMAIL        = 0x10,
-    PARAM_TEAM_PHONE        = 0x11,
-    PARAM_TEAM_ADDRESS      = 0x12,
-    PARAM_TEAM_BANK         = 0x13,
-    PARAM_TEAM_IBAN         = 0x14,
-    PARAM_TEAM_BIC          = 0x15,
-    PARAM_TEAM_ORISID       = 0x16,
-    PARAM_TEAM_OTHER_INFO   = 0x17,
+	// --- Informace o vlastníkovi (Oddíl) ---
+	PARAM_TEAM_OWNER        = 0x0C,
+	PARAM_TEAM_SHORTCUT     = 0x0D,
+	PARAM_TEAM_NATION       = 0x0E,
+	PARAM_TEAM_LEADER       = 0x0F,
+	PARAM_TEAM_EMAIL        = 0x10,
+	PARAM_TEAM_PHONE        = 0x11,
+	PARAM_TEAM_ADDRESS      = 0x12,
+	PARAM_TEAM_BANK         = 0x13,
+	PARAM_TEAM_IBAN         = 0x14,
+	PARAM_TEAM_BIC          = 0x15,
+	PARAM_TEAM_ORISID       = 0x16,
+	PARAM_TEAM_OTHER_INFO   = 0x17,
 
-		// --- NB-IOT Parametry ---
-		PARAM_NBIOT_APN         = 0x18,
-		PARAM_NBIOT_IP          = 0x19,
-		PARAM_NBIOT_PORT        = 0x1A
+	// --- NB-IOT Parametry ---
+	PARAM_NBIOT_APN         = 0x18,
+	PARAM_NBIOT_IP          = 0x19,
+	PARAM_NBIOT_PORT        = 0x1A
 } Config_Param_t;
+
+// ===== External variables ===============================================================
 
 // Zpřístupnění hlavního RTC ovladače z main.c
 extern RTC_HandleTypeDef hrtc;
 
-// -----------------------------------------------------------------------------
+// ===== External functions ===============================================================
+
+extern void System_Signalize_Start(uint8_t seconds);
+extern void Get_ADC_Measurements(int8_t *out_temp, uint16_t *out_batt_mv);
+extern void NBIOT_Force_Sleep(void);
+
+extern uint8_t CDC_Transmit_FS(uint8_t* Buf, uint16_t Len);
+
+// ===== Function declaration =============================================================
+
+void System_Send_ACK(uint8_t *payload, uint8_t length, uint8_t source);
+
+// Callback časovače pouze probudí finální Task
+static void DisconnectTimer_Callback(void) {
+    UTIL_SEQ_SetTask(1 << CFG_TASK_EXECUTE_DISCONNECT, CFG_SCH_PRIO_0);
+}
+void Execute_Disconnect_Task(void);
+
+// ===== Function definition ==============================================================
+
 // PŘEVODNÍK: UNIX TIMESTAMP -> STM32 RTC KALENDÁŘ
-// -----------------------------------------------------------------------------
 static void Convert_UnixToRTC(uint32_t unix_time, RTC_TimeTypeDef *time, RTC_DateTypeDef *date)
 {
     // Výpočet času v rámci dne
@@ -166,9 +186,7 @@ static void Convert_UnixToRTC(uint32_t unix_time, RTC_TimeTypeDef *time, RTC_Dat
     if (date->WeekDay == 0) date->WeekDay = 7; // STM32 počítá týden 1-7 (Pondělí - Neděle)
 }
 
-// -----------------------------------------------------------------------------
 // PŘEVODNÍK: STM32 RTC KALENDÁŘ -> UNIX TIMESTAMP
-// -----------------------------------------------------------------------------
 static uint32_t Convert_RTCToUnix(RTC_DateTypeDef *date, RTC_TimeTypeDef *time)
 {
     uint16_t y = date->Year + 2000;
@@ -185,25 +203,7 @@ static uint32_t Convert_RTCToUnix(RTC_DateTypeDef *date, RTC_TimeTypeDef *time)
     return (days * 86400) + (time->Hours * 3600) + (time->Minutes * 60) + time->Seconds;
 }
 
-// =============================================================================
-// STAVOVÉ PROMĚNNÉ PRO KRÁJEČ (CHUNKER)
-// =============================================================================
-static uint8_t *chunk_ptr = NULL;        // Ukazatel na to, co zrovna odesíláme
-static uint32_t chunk_rem_len = 0;       // Kolik bajtů nám ještě zbývá odeslat
-static uint8_t  chunk_active_cmd = 0;    // Jaký příkaz se zrovna vykonává
 
-#define CHUNK_MAX_SIZE 20 // Maximální velikost jedné rány (BLE MTU to bezpečně snese)
-
-// =============================================================================
-// STAVOVÉ PROMĚNNÉ PRO RELACI (SESSION & STAGING)
-// =============================================================================
-static bool is_unlocked = false;           // Stav zámku (Odemčeno / Zamčeno)
-static BeaconConfig_t staged_config;       // RAM kopie konfigurace KONTROLY pro úpravy      // RAM kopie konfigurace pro úpravy
-
-// =============================================================================
-// KRYPTOGRAFIE (Challenge-Response)
-// =============================================================================
-static uint32_t current_challenge = 0; // Paměť pro aktuálně vygenerovanou výzvu
 
 // Murmur3 Avalanche Hash (Jednoduchá, ale velmi silná míchací funkce)
 static uint32_t Generate_Response(uint32_t challenge, uint32_t pin) {
@@ -216,9 +216,7 @@ static uint32_t Generate_Response(uint32_t challenge, uint32_t pin) {
     return mix; // Výsledný Hash (Response)
 }
 
-// =============================================================================
 // FUNKCE KRÁJEČE (Volá se asynchronně přes Sequencer)
-// =============================================================================
 void BLE_Chunker_Task(void)
 {
 	if (chunk_rem_len == 0) return; // Není co posílat
@@ -261,9 +259,7 @@ void BLE_Chunker_Task(void)
 	}
 }
 
-// =============================================================================
 // HARDWAROVÉ VYPNUTÍ DO STORAGE MÓDU
-// =============================================================================
 static void System_Enter_Storage_Mode(void)
 {
 	APP_DBG(">>> SYSTEM: Prechod do hlubokeho spanku (STORAGE) <<<");
@@ -278,23 +274,18 @@ static void System_Enter_Storage_Mode(void)
 	// 2. Vyčistíme všechny staré Wake-Up vlajky
 	__HAL_PWR_CLEAR_FLAG(PWR_FLAG_WU);
 
-	// 3. POVOLENÍ WAKE-UP PINU PRO MAGNET
-	// STM32WB55 má 5 možných WKUP pinů (PA0, PC13, PC12, PA2, PC5).
-	// ZDE SI MUSÍŠ ZVOLIT TEN, NA KTERÉM JE TVÁ HALLOVA SONDA!
-	// (Příklad pro PA0 = WKUP1, reaguje na vzestupnou hranu / HIGH):
+	// 3. Povolení WAKE-UP pinu pro Hallovu sondu
 	HAL_PWR_EnableWakeUpPin(PWR_WAKEUP_PIN1_HIGH);
 
 	// Pokud sonda vrací v klidu HIGH a při přiložení magnetu spadne na LOW,
-	// použij parametr PWR_WAKEUP_PIN1_LOW (dostupné dle revize HAL knihoven).
+	// použijeme parametr PWR_WAKEUP_PIN1_LOW
 
 	// 4. Skok do Standby módu (Deska se vypne, RAM se smaže)
 	// Probudí se jedině magnetem, čímž proběhne klasický reset a start od main()
 	HAL_PWR_EnterSTANDBYMode();
 }
 
-// -----------------------------------------------------------------------------
 // CALLBACK: PARSER - Zde zpracováváme příkazy z Mobilu a zprávy z Rádia
-// -----------------------------------------------------------------------------
 static SVCCTL_EvtAckStatus_t Tunnel_Event_Handler(void *pckt)
 {
 	// LOCKDOWN: Pokud se zrovna vypínáme, ignorujeme všechny nové požadavky od mobilu!
@@ -340,10 +331,8 @@ static SVCCTL_EvtAckStatus_t Tunnel_Event_Handler(void *pckt)
 	return SVCCTL_EvtNotAck;
 }
 
-// =============================================================================
 // AGNOSTICKÉ JÁDRO PRO ZPRACOVÁNÍ PŘÍKAZŮ (Voláno z BLE, NB-IoT i USB)
 // source: 0 = BLE, 1 = NB-IoT, 2 = USB
-// =============================================================================
 void System_Execute_Command(uint8_t *payload_data, uint8_t payload_len, uint8_t source)
 {
 	if (payload_len == 0) return;
@@ -449,7 +438,7 @@ void System_Execute_Command(uint8_t *payload_data, uint8_t payload_len, uint8_t 
 			uint8_t *data_ptr = NULL;
 			uint32_t data_len = 0;
 
-			// Předáme požadavek paměťovému modulu (všimni si, že param je nyní uint32_t!)
+			// Předáme požadavek paměťovému modulu
 			extern void Logger_GetDownloadData(uint8_t cmd, uint32_t param, uint8_t **start_ptr, uint32_t *len);
 			Logger_GetDownloadData(cmd, param, &data_ptr, &data_len);
 
@@ -480,7 +469,7 @@ void System_Execute_Command(uint8_t *payload_data, uint8_t payload_len, uint8_t 
 
 		case CMD_SYNC_TIME: // CMD_SYNC_TIME (Seřízení RTC hodin Kontroly)
 			if (is_unlocked) {
-				// OPRAVA: Musíme si z paketu správně vytáhnout délku a data
+				// Musíme si z paketu správně vytáhnout délku a data
 				uint8_t time_payload_len = payload_len - 1; // Mínus 1 bajt za samotný příkaz
 				uint8_t *time_payload = &payload_data[1];      // Data začínají na indexu 1
 
@@ -752,10 +741,7 @@ void System_Execute_Command(uint8_t *payload_data, uint8_t payload_len, uint8_t 
 	}
 }
 
-
-// -----------------------------------------------------------------------------
 // INICIALIZACE: Registrace Služeb do BLE Stacku
-// -----------------------------------------------------------------------------
 void P2PS_APP_Init(void) {
 	Char_UUID_t uuid;
 
@@ -792,21 +778,19 @@ void BLE_Tunnel_Send(uint8_t *pPayload, uint16_t length) {
 	aci_gatt_update_char_value(OrienteeringServiceHdle, TxCharHdle, 0, length, pPayload);
 }
 
-// =============================================================================
 // UNIVERZÁLNÍ ODESÍLATEL ODPOVĚDÍ (Směřuje ACK tam, odkud přišel dotaz)
-// =============================================================================
 void System_Send_ACK(uint8_t *payload, uint8_t length, uint8_t source) {
 	if (source == 0) {
 		// Odpověď do Bluetooth
 		BLE_Tunnel_Send(payload, length);
 	}
 	else if (source == 1) {
-		// Odpověď do NB-IoT (Připravíme si to pro Downlink)
+		// Odpověď do NB-IoT
 		// Zde později napojíme odeslání přes Quectel (např. přes FIFO)
 		APP_DBG(">>> SYS ACK: Smerovano do NB-IoT (Zatim neimplementovano)");
 	}
 	else if (source == 2) {
-		// --- NOVÉ: Odeslání po kabelu do PC ---
+		// Odeslání po USB do PC
 		// Vložíme payload rovnou do funkce ST knihovny
 		uint8_t result = CDC_Transmit_FS(payload, length);
 
@@ -816,9 +800,8 @@ void System_Send_ACK(uint8_t *payload, uint8_t length, uint8_t source) {
 	}
 }
 
-// -----------------------------------------------------------------------------
+
 // CALLBACK: Stav připojení (Volá se z app_ble.c)
-// -----------------------------------------------------------------------------
 void P2PS_APP_Notification(P2PS_APP_ConnHandle_Not_evt_t *pNotification)
 {
 	switch (pNotification->P2P_Evt_Opcode)
