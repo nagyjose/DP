@@ -49,26 +49,27 @@
 #include "app_nbiot.h"
 #include "stm32wbxx_hal.h"
 
+// ===== Defines ==========================================================================
 
 // HW Revize a typ
 #define HW_REV_BASE "Rev 2.1 Kontrola"
+
+// ===== Global variables =================================================================
+
+// Globální pole pro finální hardwarovou verzi
+char hw_ver_full[32];
+RTC_HandleTypeDef hrtc = { 0 }; /**< RTC handler declaration */
+IWDG_HandleTypeDef hiwdg;
+
+// ===== External variables ===============================================================
 
 // Propojení s automaticky generovaným souborem version.c
 extern const char fw_ver[];
 extern const char git_hash[];
 
-// Globální pole pro finální hardwarovou verzi
-char hw_ver_full[32];
+// ===== External functions ===============================================================
+// ===== Function declaration =============================================================
 
-/* Private typedef -----------------------------------------------------------*/
-/* Private defines -----------------------------------------------------------*/
-/* Private macros ------------------------------------------------------------*/
-/* Global variables ---------------------------------------------------------*/
-RTC_HandleTypeDef hrtc = { 0 }; /**< RTC handler declaration */
-IWDG_HandleTypeDef hiwdg;
-
-/* Private variables ---------------------------------------------------------*/
-/* Private function prototypes -----------------------------------------------*/
 static void Reset_BackupDomain( void );
 static void Init_RTC( void );
 static void SystemClock_Config( void );
@@ -78,7 +79,7 @@ static void Init_Exti( void );
 void Error_Handler(void);
 void HW_USB_Clock_Init(void);
 
-/* Functions Definition ------------------------------------------------------*/
+// ===== Function definition ==============================================================
 
 /**
  * @brief  Main program

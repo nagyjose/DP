@@ -44,11 +44,6 @@
 #include "usbd_cdc_if.h"
 
 // ===== Defines ==========================================================================
-// ===== Global variables =================================================================
-// ===== External variables ===============================================================
-// ===== External functions ===============================================================
-// ===== Function declaration =============================================================
-// ===== Function definition ==============================================================
 
 #define CFG_USB_INTERFACE_ENABLE  0   // 1 = Zapnuto, 0 = USB se vůbec nekompiluje
 #define NBIOT_HARDWARE_CONNECTED  0   // 1 = Modul zapojen, 0 = Modul odpojen

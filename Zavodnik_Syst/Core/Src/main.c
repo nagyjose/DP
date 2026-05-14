@@ -36,10 +36,7 @@
   ******************************************************************************
   */
 
-
-/* Includes ------------------------------------------------------------------*/
 #include "app_common.h"
-
 #include "app_entry.h"
 #include "stm32_lpm.h"
 #include "stm32_seq.h"
@@ -48,25 +45,27 @@
 #include <stdio.h>  // Pro funkci snprintf
 #include "app_entry.h"
 
+// ===== Defines ==========================================================================
+
 // HW Revize a typ
 #define HW_REV_BASE "Rev 2.1 Závodník"
+
+// ===== Global variables =================================================================
+
+// Globální pole pro finální hardwarovou verzi
+char hw_ver_full[32];
+RTC_HandleTypeDef hrtc = { 0 };
+IWDG_HandleTypeDef hiwdg;
+
+// ===== External variables ===============================================================
 
 // Propojení s automaticky generovaným souborem version.c
 extern const char fw_ver[];
 extern const char git_hash[];
 
-// Globální pole pro finální hardwarovou verzi
-char hw_ver_full[32];
+// ===== External functions ===============================================================
+// ===== Function declaration =============================================================
 
-/* Private typedef -----------------------------------------------------------*/
-/* Private defines -----------------------------------------------------------*/
-/* Private macros ------------------------------------------------------------*/
-/* Global variables ---------------------------------------------------------*/
-RTC_HandleTypeDef hrtc = { 0 }; /**< RTC handler declaration */
-IWDG_HandleTypeDef hiwdg;
-
-/* Private variables ---------------------------------------------------------*/
-/* Private function prototypes -----------------------------------------------*/
 static void Reset_BackupDomain( void );
 static void Init_RTC( void );
 static void SystemClock_Config( void );
@@ -74,7 +73,7 @@ static void Reset_Device( void );
 static void Reset_IPCC( void );
 static void Init_Exti( void );
 
-/* Functions Definition ------------------------------------------------------*/
+// ===== Function definition ==============================================================
 
 /**
  * @brief  Main program
@@ -104,16 +103,16 @@ int main( void )
 
 	Init_RTC();
 
-	// --- INICIALIZACE NAŠEHO PWM BZUČÁKU ---
+	// Inicializace bzučáku
 	extern void Buzzer_PWM_Init(void);
 	Buzzer_PWM_Init();
 
 	APP_Init( );
 
-	/* NÁŠ HARDWAROVÝ WATCHDOG (2 sekundy) */
+	// Harwarový watchdog
 	hiwdg.Instance = IWDG;
 	hiwdg.Init.Prescaler = IWDG_PRESCALER_32;  // 1 tik = 1 milisekunda
-	hiwdg.Init.Reload = 2000;                  // Pes kouše po 2000 ms (2 sekundy)
+	hiwdg.Init.Reload = 2000;                  // perioda 2 sekundy
 	hiwdg.Init.Window = 4095;
 	if (HAL_IWDG_Init(&hiwdg) != HAL_OK)
 	{
@@ -357,14 +356,14 @@ void HAL_Delay(uint32_t Delay)
   }
 }
 
-/* TÍMTO PŘEPÍŠEME SKRYTOU TOVÁRNÍ FUNKCI PRO SPÁNEK */
+// Přepsání tovární WEAK funkce pro spánek
 void UTIL_SEQ_Idle(void)
 {
-	// 1. Nakrmíme psa pokaždé, když procesor procitne.
+	// 1. refresh watchdogu
 		HAL_IWDG_Refresh(&hiwdg);
 
-		// 2. Procesor M4 přejde do režimu Sleep.
-		// Bude probuzen jakýmkoliv přerušením (včetně 1ms SysTicku nebo zprávy od rádia M0+).
-		__WFI();
+	// 2. Procesor M4 přejde do režimu Sleep.
+	// Bude probuzen jakýmkoliv přerušením (včetně 1ms SysTicku nebo zprávy od rádia M0+).
+	__WFI();
 }
 

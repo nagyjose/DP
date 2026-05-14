@@ -1,3 +1,23 @@
+/* USER CODE BEGIN Header */
+/**
+  ******************************************************************************
+ * @file    flash_logger.h
+ * @author  Josef Nagy
+ * @brief
+  ******************************************************************************
+  * @attention
+  *
+  * Copyright (c) 2026 Josef Nagy.
+  * All rights reserved.
+  *
+  * This software is licensed under terms that can be found in the LICENSE file
+  * in the root directory of this software component.
+  * If no LICENSE file comes with this software, it is provided AS-IS.
+  *
+  ******************************************************************************
+  */
+/* USER CODE END Header */
+
 #ifndef FLASH_LOGGER_H
 #define FLASH_LOGGER_H
 
@@ -37,7 +57,7 @@ void Logger_Init(void);
 void Logger_SavePunch(uint8_t* raw_payload, uint8_t rssi_abs, int8_t temperature);
 // Upravená hlavička funkce, aby přijala přímo data majáku CLEAR
 void Logger_NewRace(uint8_t* raw_clear_payload);
-// PŘIDÁNO: Funkce pro vyčítání dat do BLE Tunelu
+// Funkce pro vyčítání dat do BLE Tunelu
 void Logger_GetDownloadData(uint8_t cmd, uint8_t param, uint8_t **start_ptr, uint32_t *len);
 void Logger_FormatAll(void);
 void Config_Commit(RunnerConfig_t *new_cfg);

@@ -1,4 +1,22 @@
-
+/* USER CODE BEGIN Header */
+/**
+  ******************************************************************************
+ * @file    flash_logger.c
+ * @author  Josef Nagy
+ * @brief
+  ******************************************************************************
+  * @attention
+  *
+  * Copyright (c) 2026 Josef Nagy.
+  * All rights reserved.
+  *
+  * This software is licensed under terms that can be found in the LICENSE file
+  * in the root directory of this software component.
+  * If no LICENSE file comes with this software, it is provided AS-IS.
+  *
+  ******************************************************************************
+  */
+/* USER CODE END Header */
 
 #include "flash_logger.h"
 #include "dbg_trace.h"
@@ -7,16 +25,24 @@
 #include <stdbool.h>
 #include "stm32wbxx_hal.h"
 
-extern IWDG_HandleTypeDef hiwdg; // Potřebujeme sáhnout na psa v main.c
+// ===== Defines ==========================================================================
+// ===== Global variables =================================================================
 
 // Globální proměnné pro rychlý zápis z RAM
 static uint32_t current_flash_ptr = LOGGER_START_ADDR;
 static uint16_t current_punch_index = 0;
-bool is_race_closed = false; // <--- PŘIDÁNO: Zámek aktuálního závodu
+bool is_race_closed = false;
 
-// =============================================================================
-// VÝPOČET CRC-32 (Standardní IEEE 802.3 polynom)
-// =============================================================================
+// ===== External variables ===============================================================
+// ===== External functions ===============================================================
+
+extern IWDG_HandleTypeDef hiwdg; // Potřebujeme sáhnout na psa v main.c
+
+// ===== Function declaration =============================================================
+// ===== Function definition ==============================================================
+
+
+// Výpočet CRC-32 (Standardní IEEE 802.3 polynom)
 static uint32_t Calculate_CRC32(uint8_t *data, uint32_t length)
 {
     uint32_t crc = 0xFFFFFFFF;
@@ -39,9 +65,7 @@ static void ErasePage(uint32_t page_address)
 	// Výpočet čísla stránky z adresy
 	uint32_t page_index = (page_address - 0x08000000) / 4096;
 
-	// VÝRAZNÝ LOG PŘI MAZÁNÍ
 	APP_DBG("--- FLASH: MAZANI STRANKY 0x%08X (Cislo: %lu) ---", page_address, page_index);
-
 
 	EraseInitStruct.TypeErase = FLASH_TYPEERASE_PAGES;
 	// Výpočet čísla stránky z adresy (0x08000000 je start, stránka má 4096 B)
@@ -54,7 +78,7 @@ static void ErasePage(uint32_t page_address)
 	HAL_FLASH_Lock();
 }
 
-// 1. INICIALIZACE PŘI BOOTU (Hledání ztraceného pointeru)
+// Inicializace při bootu (Hledání ztraceného pointeru)
 void Logger_Init(void)
 {
 	uint32_t active_page_addr = LOGGER_START_ADDR;
@@ -69,8 +93,8 @@ void Logger_Init(void)
 		uint64_t current_page_head = *(volatile uint64_t*)page_addr;
 		uint64_t next_page_head = *(volatile uint64_t*)next_page_addr;
 
-		// Našli jsme stránku, která má data, ale stránka za ní je smazaná (samé 1).
-		// To je náš aktivní závod!
+		// Nalezena stránka, která má data, ale stránka za ní je smazaná (samé 1).
+		// -> Aktivní závod
 		if (current_page_head != 0xFFFFFFFFFFFFFFFF && next_page_head == 0xFFFFFFFFFFFFFFFF)
 		{
 			active_page_addr = page_addr;
@@ -90,13 +114,12 @@ void Logger_Init(void)
 
 	while (*(volatile uint64_t*)current_flash_ptr != 0xFFFFFFFFFFFFFFFF)
 	{
-		// --- PŘIDÁNO: Kontrola, zda tento záznam není CÍL ---
+		// Kontrola, zda tento záznam není CÍL
 		uint8_t *raw = (uint8_t*)current_flash_ptr;
 		uint16_t cid = (raw[0] << 4) | (raw[1] >> 4);
 		if (cid == FINISH_CONTROL_ID) {
 			is_race_closed = true;
 		}
-		// ----------------------------------------------------
 
 		current_punch_index++;
 		current_flash_ptr += 8;
@@ -108,17 +131,13 @@ void Logger_Init(void)
 	APP_DBG("LOGGER INIT: Aktivni stranka: 0x%08X, Zaznamu: %d", active_page_addr, current_punch_index);
 }
 
-// 2. ORAŽENÍ KONTROLY (Bleskový zápis)
-// Najdi funkci Logger_SavePunch a uprav její tělo takto:
-
+// Oražení kontroly (Bleskový zápis)
 void Logger_SavePunch(uint8_t* raw_payload, uint8_t rssi_abs, int8_t temperature)
 {
 	// Vyčteme si ID kontroly ze syrových dat
 	uint16_t control_id = (raw_payload[0] << 4) | (raw_payload[1] >> 4);
 
-	// =========================================================================
-	// POJISTKA PRO CÍL (Rezervace pozice 512)
-	// =========================================================================
+	// Pojistka pro cíl (Rezervace pozice 512)
 	// Pokud nám zbývá poslední místo na stránce (index 511) a NENÍ to Cíl...
 	if (current_punch_index == (LOGGER_MAX_RECORDS_PP - 1) && control_id != FINISH_CONTROL_ID) {
 		APP_DBG("LOGGER WARNING: Stranka plna, rezervovano vyhradne pro CIL!");
@@ -140,9 +159,9 @@ void Logger_SavePunch(uint8_t* raw_payload, uint8_t rssi_abs, int8_t temperature
 	}
 
 	record.data.rssi = rssi_abs;
-	record.data.temperature = temperature; // Nová teplota!
+	record.data.temperature = temperature;
 
-	// --- PŘIDÁNO: Uzamčení závodu po oražení Cíle ---
+	// Uzamčení závodu po oražení Cíle
 	if (control_id == FINISH_CONTROL_ID) {
 		is_race_closed = true;
 	}
@@ -155,7 +174,7 @@ void Logger_SavePunch(uint8_t* raw_payload, uint8_t rssi_abs, int8_t temperature
 	current_flash_ptr += 8;
 	current_punch_index++;
 
-	// --- Rozbalení POUZE pro lidský výpis do logu ---
+	// Rozbalení pouze pro výpis do logu
 	// uint16_t control_id = (raw_payload[0] << 4) | (raw_payload[1] >> 4);
 	uint8_t sub_seconds = raw_payload[1] & 0x0F;
 	uint32_t unix_time = ((uint32_t)raw_payload[2] << 24) | ((uint32_t)raw_payload[3] << 16) |
@@ -165,10 +184,10 @@ void Logger_SavePunch(uint8_t* raw_payload, uint8_t rssi_abs, int8_t temperature
 					 saved_addr, control_id, unix_time, sub_seconds, rssi_abs, temperature);
 }
 
-// 3. CLEAR KONTROLA (Nulování a přesun na další stránku)
+// Clear kontrola (Nulování a přesun na další stránku)
 void Logger_NewRace(uint8_t* raw_clear_payload)
 {
-	is_race_closed = false; // <--- PŘIDÁNO: Odemknutí nového závodu
+	is_race_closed = false; // Odemknutí nového závodu
 
 	//uint32_t current_page_offset = current_flash_ptr - LOGGER_START_ADDR;
 	//uint32_t current_page_index = current_page_offset / LOGGER_PAGE_SIZE;
@@ -176,18 +195,17 @@ void Logger_NewRace(uint8_t* raw_clear_payload)
 
 	uint32_t current_page_addr = current_flash_ptr - (current_punch_index * 8);
 	uint32_t current_page_index = (current_page_addr - LOGGER_START_ADDR) / LOGGER_PAGE_SIZE;
-	// =========================================================================
-	// INTELIGENTNÍ CLEAR (ZÁCHRANA PAMĚTI)
-	// =========================================================================
+
+	// Inteligentní clear (záchrana paměti)
 	if (current_punch_index == 0)
 	{
-		// Stránka je prázdná, prostě rovnou zapíšeme první záznam
+		// Stránka je prázdná, rovnou zapíšeme první záznam
 		Logger_SavePunch(raw_clear_payload, 0, 20);
 		APP_DBG(">>> INTELIGENTNI CLEAR! Prvni zapis na cistou stranku.");
 	}
 	else if (current_punch_index == 1)
 	{
-		// Na stránce je PŘESNĚ JEDEN záznam (z předchozího CLEAR).
+		// Na stránce je přesně jeden záznam (z předchozího CLEAR).
 		// Jdeme ho přečíst přímo z Flash paměti (6 bajtů payloadu).
 		uint8_t* saved_payload = (uint8_t*)current_page_addr;
 
@@ -201,7 +219,7 @@ void Logger_NewRace(uint8_t* raw_clear_payload)
 
 		if (is_identical)
 		{
-			// Záznam je totožný s tím, co tam leží. NEDĚLÁME NIC!
+			// Záznam je totožný s tím, co tam leží. Neděláme nic
 			APP_DBG(">>> INTELIGENTNI CLEAR! Zaznam je shodny, setrim pamet (nic nemazu).");
 			return;
 		}
@@ -217,9 +235,7 @@ void Logger_NewRace(uint8_t* raw_clear_payload)
 	}
 	else
 	{
-		// =====================================================================
-		// STANDARDNÍ CLEAR (Máme už záznamy ze závodu, posouváme se na N+1)
-		// =====================================================================
+		// Standardní clear (Máme už záznamy ze závodu, posouváme se na N+1)
 		uint32_t next_page_index = (current_page_index + 1) % LOGGER_MAX_PAGES;
 		uint32_t next_page_addr = LOGGER_START_ADDR + (next_page_index * LOGGER_PAGE_SIZE);
 
@@ -236,7 +252,7 @@ void Logger_NewRace(uint8_t* raw_clear_payload)
 	}
 }
 
-// Pomocná funkce pro smazání nulté konfigurační stránky (Page 32)
+// Pomocná funkce pro smazání nulté konfigurační stránky (strana 32)
 static void EraseConfigPage(void)
 {
 	FLASH_EraseInitTypeDef EraseInitStruct;
@@ -253,9 +269,8 @@ static void EraseConfigPage(void)
 	HAL_FLASH_Lock();
 }
 
-// =============================================================================
-// TOVÁRNÍ NASTAVENÍ A ZÁPIS DO FLASH
-// =============================================================================
+
+// Tovární nastavení a zápis do flash
 static void Config_FactoryReset(void)
 {
 	APP_DBG("CONFIG: Vytvarim tovarni nastaveni...");
@@ -264,10 +279,10 @@ static void Config_FactoryReset(void)
 	RunnerConfig_t def_cfg;
 	memset(&def_cfg, 0, sizeof(RunnerConfig_t));
 
-	// --- NAPLNĚNÍ VÝCHOZÍMI HODNOTAMI ---
+	// Naplnění výchozími hodnotami
 	def_cfg.magic_word = 0xCAFECAFE;
 	strcpy(def_cfg.hw_revision, "Rev 1.0 ZAVODNIK");
-	// fw_version se doplní dynamicky v main.c pomocí tvého extern Gitu
+	// fw_version se doplní dynamicky v main.c pomocí extern Gitu
 
 	// Vysílané informace
 	def_cfg.comp_device_type = 0x00;       // Standardní závodník
@@ -284,11 +299,11 @@ static void Config_FactoryReset(void)
 	strcpy(def_cfg.comp_name, "Neznamy Zavodnik");
 	strcpy(def_cfg.comp_nationality, "CZE");
 
-	// --- VÝPOČET CRC-32 ---
+	// Výpočet CRC-32
 	def_cfg.control_sum = 0; // Před výpočtem musíme pole vynulovat
 	def_cfg.control_sum = Calculate_CRC32((uint8_t*)&def_cfg, sizeof(RunnerConfig_t));
 
-	// --- ZÁPIS DO FLASH PAMĚTI ---
+	// Zápis do flash paměti
 	EraseConfigPage(); // Smažeme starý odpad
 
 	// Budeme data čist jako pole obyčejných bajtů (bezpečné pro packed struktury)
@@ -316,12 +331,10 @@ static void Config_FactoryReset(void)
 	APP_DBG("CONFIG: Tovarni nastaveni uspesne zapsano!");
 }
 
-// =============================================================================
-// HLAVNÍ INICIALIZACE A ZÁCHRANNÝ RESET (Voláno z main.c)
-// =============================================================================
+// Hlavní inicializace a záchranný reset (Voláno z main.c)
 void Config_Init(void)
 {
-	// 1. ZÁCHRANNÁ BRZDA: Kontrola tlačítka SW3 při startu desky
+	// 1. Záchranná brzda: Kontrola tlačítka SW3 při startu desky (poue vývojová varianta)
 	// Tlačítko je Active-Low (Při stisku vrací 0, v klidu 1)
 	if (BSP_PB_GetState(BUTTON_SW3) == 0)
 	{
@@ -333,12 +346,12 @@ void Config_Init(void)
 		{
 			uint8_t hold_time = 0;
 
-			// Cyklus běží POUZE dokud uživatel fyzicky drží tlačítko
+			// Cyklus běží pouze dokud uživatel fyzicky drží tlačítko
 			while(BSP_PB_GetState(BUTTON_SW3) == 0) {
 				HAL_Delay(100);
 				hold_time++;
 
-				// !!! KRITICKÉ: Nakrmíme psa, aby nás během držení nesežral !!!
+				// Watchdog doplnění
 				HAL_IWDG_Refresh(&hiwdg);
 
 				if(hold_time > 30) { // 30 * 100ms = 3 vteřiny
@@ -354,10 +367,7 @@ void Config_Init(void)
 		}
 	}
 
-	// =========================================================================
-	// 2. KONTROLA INTEGRITY PAMĚTI (Magic Word + CRC-32)
-	// =========================================================================
-
+	// 2. Kontrola integrity paměti (Magic Word + CRC-32)
 	// Zkopírujeme si obsah Flash do RAM, abychom s ním mohli pracovat
 	RunnerConfig_t temp_cfg;
 	memcpy(&temp_cfg, (void*)DEVICE_CONFIG, sizeof(RunnerConfig_t));
@@ -382,9 +392,7 @@ void Config_Init(void)
 	}
 }
 
-// -----------------------------------------------------------------------------
-// PŘÍPRAVA DAT PRO BLE TUNEL
-// -----------------------------------------------------------------------------
+// Příprava dat pro tunel
 void Logger_GetDownloadData(uint8_t cmd, uint8_t param, uint8_t **start_ptr, uint32_t *len)
 {
 	if (cmd == 0x20) {
@@ -410,9 +418,9 @@ void Logger_GetDownloadData(uint8_t cmd, uint8_t param, uint8_t **start_ptr, uin
 				return;
 		}
 
-		// Protože jsi paměť naformátoval (a 640 KB je obrovský prostor),
-		// všechna tvá data leží bezpečně a souvisle od začátku paměti
-		// až po tvůj aktuální ukazatel zápisu.
+		// Protože je paměť naformátována (a 640 KB je obrovský prostor),
+		// všechna  data leží bezpečně a souvisle od začátku paměti
+		// až po aktuální ukazatel zápisu.
 		*start_ptr = (uint8_t*)LOGGER_START_ADDR;
 		*len = current_flash_ptr - LOGGER_START_ADDR;
 	}
@@ -443,7 +451,7 @@ void Logger_GetDownloadData(uint8_t cmd, uint8_t param, uint8_t **start_ptr, uin
 
 			uint64_t val = *(volatile uint64_t*)search_ptr;
 
-			// TOTO BYLA TA CHYBA: Pokud narazíme na prázdné místo mezi stránkami,
+			// Pokud narazíme na prázdné místo mezi stránkami,
 			// nesmíme to ukončit! Jen ho v klidu přeskočíme a hledáme dál.
 			if (val == 0xFFFFFFFFFFFFFFFF) {
 				continue;
@@ -469,10 +477,7 @@ void Logger_GetDownloadData(uint8_t cmd, uint8_t param, uint8_t **start_ptr, uin
 			}
 		}
 
-		// =====================================================================
-		// VYHODNOCENÍ A PŘEDÁNÍ KRÁJEČI
-		// =====================================================================
-
+		// Vyhodnocení a předání kráječi
 		// Pokud jsme nenašli dostatek CLEARů (uživatel chce víc historie, než máme)
 		if (clears_found < (param + 1)) {
 			*start_ptr = NULL;
@@ -482,12 +487,12 @@ void Logger_GetDownloadData(uint8_t cmd, uint8_t param, uint8_t **start_ptr, uin
 
 		*start_ptr = (uint8_t*)start_of_target;
 
-		// NOVÉ: Přesný výpočet délky bez prázdné vaty (0xFF)
+		// Přesný výpočet délky bez prázdné vaty (0xFF)
 		uint32_t exact_len = 0;
 		uint32_t read_ptr = start_of_target;
 
 		// Půjdeme od začátku závodu dopředu, dokud nenarazíme na další závod (end_of_target)
-		// NEBO dokud nenarazíme na prázdnou paměť (0xFFFFFFFFFFFFFFFF).
+		// nebo dokud nenarazíme na prázdnou paměť (0xFFFFFFFFFFFFFFFF).
 		while (read_ptr != end_of_target) {
 			uint64_t val = *(volatile uint64_t*)read_ptr;
 
@@ -514,9 +519,7 @@ void Logger_GetDownloadData(uint8_t cmd, uint8_t param, uint8_t **start_ptr, uin
 	}
 }
 
-// -----------------------------------------------------------------------------
-// FORMÁTOVÁNÍ CELÉ PAMĚTI (Příkaz z BLE)
-// -----------------------------------------------------------------------------
+// Formátování celé paměti (Příkaz z BLE)
 void Logger_FormatAll(void)
 {
 	APP_DBG("--- FORMATOVANI CELE PAMETI (159 stranek) ZACAHA... ---");
@@ -525,7 +528,7 @@ void Logger_FormatAll(void)
 		uint32_t page_addr = LOGGER_START_ADDR + (i * LOGGER_PAGE_SIZE);
 		ErasePage(page_addr);
 
-		// Nakrmíme psa, aby nás během dlouhého mazání nesežral
+		// atchdog refresh
 		HAL_IWDG_Refresh(&hiwdg);
 	}
 
@@ -536,12 +539,10 @@ void Logger_FormatAll(void)
 	APP_DBG("--- FORMATOVANI DOKONCENO, PAMET JE CISTA ---");
 }
 
-// -----------------------------------------------------------------------------
-// HROMADNÝ ZÁPIS KONFIGURACE (COMMIT z RAM)
-// -----------------------------------------------------------------------------
+// Hromadný zápis konfigurace (commit z RAM)
 void Config_Commit(RunnerConfig_t *new_cfg)
 {
-	// --- VÝPOČET CRC-32 PŘED ZÁPISEM ---
+	// Výpočet CRC-32 před zápisem
 	new_cfg->control_sum = 0; // Vynulujeme starý součet
 	new_cfg->control_sum = Calculate_CRC32((uint8_t*)new_cfg, sizeof(RunnerConfig_t));
 
@@ -568,9 +569,7 @@ void Config_Commit(RunnerConfig_t *new_cfg)
 	APP_DBG("CONFIG: Nova konfigurace byla uspesne vypalena do Flash!");
 }
 
-// -----------------------------------------------------------------------------
-// TVRDÉ RESETOVACÍ FUNKCE (Vyvolané z BLE)
-// -----------------------------------------------------------------------------
+// Tvrdé resetovací funkce (Vyvolané z BLE)
 void Config_EraseAndReboot(void)
 {
     APP_DBG(">>> BLE: Mazani Konfigurace a RESTART! <<<");

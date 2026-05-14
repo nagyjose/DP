@@ -1,3 +1,23 @@
+/* USER CODE BEGIN Header */
+/**
+  ******************************************************************************
+ * @file    app_ffd_mac_802_15_4_process.c
+ * @author  Josef Nagy
+ * @brief
+  ******************************************************************************
+  * @attention
+  *
+  * Copyright (c) 2026 Josef Nagy.
+  * All rights reserved.
+  *
+  * This software is licensed under terms that can be found in the LICENSE file
+  * in the root directory of this software component.
+  * If no LICENSE file comes with this software, it is provided AS-IS.
+  *
+  ******************************************************************************
+  */
+/* USER CODE END Header */
+
 #include "app_ffd_mac_802_15_4_process.h"
 #include "app_conf.h"
 #include "dbg_trace.h"
@@ -12,17 +32,53 @@
 #include "stm32wbxx_hal.h"
 #include "stm32wbxx_ll_adc.h"
 
+// ===== Defines ==========================================================================
+
+#define DEFAULT_RSSI_THRESHOLD -50 // Výchozí práh pro běžné kontroly (pokud to nemají v paketu)
+
+// Makra pro spuštění a zastavení hardwarového PWM
+#define BUZZER_ON()     HAL_TIM_PWM_Start(&htim16, TIM_CHANNEL_1)
+#define BUZZER_OFF()    HAL_TIM_PWM_Stop(&htim16, TIM_CHANNEL_1)
+
+// Perioda jednoho tiku signalizace v milisekundách
+#define SIGNAL_PERIOD_MS 100
+
+// ===== Global variables =================================================================
+
+// Paměť pro filtraci
+static uint16_t scanning_control_id = 0xFFFF;
+static uint32_t history_mask = 0; // Zvětšeno na 32 bitů, kdyby někdo nastavil okno větší než 8
+
+// Paměť pro cooldown
+static uint16_t punched_control_id = 0xFFFF;
+static uint32_t last_punch_tick = 0; // ZMĚNA: Používáme lokální tick procesoru v ms!
+static uint16_t last_written_control_id = 0xFFFF; // Paměť posledního zápisu do Flash
 int volatile FrameOnGoing = FALSE;
-extern MAC_associateInd_t g_MAC_associateInd;
 MAC_dataInd_t      g_DataInd;
 static uint8_t     rx_payload_safe[128]; // PŘIDÁNO: Naše vlastní bezpečné úložiště
-
-extern uint8_t BuzzerTimerId; // Náš nový časovač pro blikání
 volatile uint8_t blink_counter = 0; // Kolikrát má ještě bliknout
+TIM_HandleTypeDef htim16; // Náš hardwarový časovač pro bzučák
+static bool is_signal_active = false; // Pomocná proměnná pro střídání stavu
 
-// =============================================================================
-// TESTOVACÍ MÓD (MOCKING)
-// =============================================================================
+// Stavový automat závodníka (WAKE-ON-RADIO / SNIFFING)
+RaceState_t current_race_state = STATE_IDLE;
+uint8_t SniffTimerId;
+uint8_t SleepTimerId;
+
+// ===== External variables ===============================================================
+
+extern MAC_associateInd_t g_MAC_associateInd;
+extern uint8_t BuzzerTimerId; // Náš nový časovač pro blikání
+extern ADC_HandleTypeDef hadc1; // Zpřístupníme ADC z main.c, pokud ho tam CubeMX generuje
+
+// ===== External functions ===============================================================
+
+extern bool Logger_IsRaceClosed(void);
+
+// ===== Function declaration =============================================================
+// ===== Function definition ==============================================================
+
+// Testovací mód
 #if (ENABLE_HARDWARE_TEST_MODE == 1)
 volatile uint8_t debug_mock_mode = 0; // 0 = Běžný Závodník, 1 = Konfigurační čip
 
@@ -36,39 +92,8 @@ void APP_MAC_Test_Button_Action(void) {
 }
 #endif
 
-// --- NASTAVENÍ FILTRU A ZÁVODNÍKA ---
-// Smazali jsme #define pro WINDOW_SIZE, HITS_REQUIRED a COOLDOWN_MS!
-// Budeme je tahat dynamicky z DEVICE_CONFIG.
 
-#define DEFAULT_RSSI_THRESHOLD -50 // Výchozí práh pro běžné kontroly (pokud to nemají v paketu)
-
-// Paměť pro filtraci
-static uint16_t scanning_control_id = 0xFFFF;
-static uint32_t history_mask = 0; // Zvětšeno na 32 bitů, kdyby někdo nastavil okno větší než 8
-
-// Paměť pro cooldown
-static uint16_t punched_control_id = 0xFFFF;
-static uint32_t last_punch_tick = 0; // ZMĚNA: Používáme lokální tick procesoru v ms!
-
-static uint16_t last_written_control_id = 0xFFFF; // Paměť posledního zápisu do Flash
-
-// =============================================================================
-// HARDWARE DRIVER: BZUČÁK (PWM) A LED
-// =============================================================================
-TIM_HandleTypeDef htim16; // Náš hardwarový časovač pro bzučák
-
-// Makra pro spuštění a zastavení hardwarového PWM
-#define BUZZER_ON()     HAL_TIM_PWM_Start(&htim16, TIM_CHANNEL_1)
-#define BUZZER_OFF()    HAL_TIM_PWM_Stop(&htim16, TIM_CHANNEL_1)
-
-// Perioda jednoho tiku signalizace v milisekundách
-#define SIGNAL_PERIOD_MS 100
-
-static bool is_signal_active = false; // Pomocná proměnná pro střídání stavu
-
-// -----------------------------------------------------------------------------
-// MANUÁLNÍ INICIALIZACE PWM (Bez CubeMX)
-// -----------------------------------------------------------------------------
+// Manuální inicializace PWM
 void Buzzer_PWM_Init(void)
 {
 	TIM_OC_InitTypeDef sConfigOC = {0};
@@ -114,9 +139,7 @@ void Buzzer_PWM_Init(void)
 	}
 }
 
-// -----------------------------------------------------------------------------
-// UNIVERZÁLNÍ API PRO SPUŠTĚNÍ SIGNALIZACE
-// -----------------------------------------------------------------------------
+// Univerzální API pro spouštění signalizace
 void System_Signalize_Start(uint8_t seconds)
 {
 	// Procesor si sám spočítá, kolikrát musí změnit stav (tiknout)
@@ -133,14 +156,8 @@ void System_Signalize_Start(uint8_t seconds)
 	}
 }
 
-// =============================================================================
-// STAVOVÝ AUTOMAT ZÁVODNÍKA (WAKE-ON-RADIO / SNIFFING)
-// =============================================================================
-RaceState_t current_race_state = STATE_IDLE; // UŽ BEZ "static"!
-uint8_t SniffTimerId;
-uint8_t SleepTimerId;
 
-// 1. BEZPEČNÉ CALLBACKY PRO ČASOVAČE (Běží v ISR - jen zařadí úkol do fronty)
+// Callbacky pro časovače (Běží v ISR - jen zařadí úkol do fronty)
 static void SniffTimer_Callback(void) {
     UTIL_SEQ_SetTask(1 << CFG_TASK_MAC_SNIFF, CFG_SCH_PRIO_0);
 }
@@ -157,18 +174,18 @@ static void MAC_Set_RX_State(bool turn_on)
 	setReq.PIB_attribute_valuePtr = &pib_val;
 	MAC_MLMESetReq(&setReq);
 
-	// !!! KRITICKÉ: Musíme počkat, až to koprocesor zpracuje !!!
+	// Čekání na zpracování koprocesorem
 	UTIL_SEQ_WaitEvt(1U << CFG_EVT_SET_CNF);
 }
 
-// Úkol: Uspi rádio (Voláno 30 ms po probuzení)
+// Uspání rádia (Voláno 30 ms po probuzení)
 void APP_MAC_SleepTask(void) {
 	if (current_race_state == STATE_IDLE) {
 		MAC_Set_RX_State(false);
 	}
 }
 
-// Úkol: Probuď rádio (Voláno každých 1000 ms)
+// Probuzení rádia (Voláno každých 1000 ms)
 void APP_MAC_SniffTask(void) {
 	if (current_race_state == STATE_IDLE) {
 		MAC_Set_RX_State(true);
@@ -202,14 +219,7 @@ void Race_StateMachine_Stop(void)
 	APP_DBG(">>> RACE STATE: ZASTAVEN (Casovace vypnuty) <<<");
 }
 
-// =============================================================================
-// FUNKCE PRO MĚŘENÍ TEPLOTY (INTERNÍ ADC STM32)
-// =============================================================================
-extern ADC_HandleTypeDef hadc1; // Zpřístupníme ADC z main.c, pokud ho tam CubeMX generuje
-
-// =============================================================================
-// HARDWARE DRIVER: UNIFIKOVANÉ MĚŘENÍ ADC (TEPLOTA + BATERIE)
-// =============================================================================
+// Unifikované měření ADC (Teplota + Akumulátor)
 void Get_ADC_Measurements(int8_t *out_temp, uint16_t *out_batt_mv)
 {
 	ADC_HandleTypeDef hadc1 = {0};
@@ -221,11 +231,11 @@ void Get_ADC_Measurements(int8_t *out_temp, uint16_t *out_batt_mv)
 
 	// 1. Povolení hodin
 	__HAL_RCC_ADC_CLK_ENABLE();
-	__HAL_RCC_GPIOA_CLK_ENABLE(); // Port pro baterii (uprav dle tvé desky)
+	__HAL_RCC_GPIOA_CLK_ENABLE(); // Port pro akumulátor
 
-	// 2. Konfigurace pinu pro baterii (PA3 - Channel 4)
+	// 2. Konfigurace pinu pro baterii (PA1 - Channel 6)
 	GPIO_InitTypeDef GPIO_InitStruct = {0};
-	GPIO_InitStruct.Pin = GPIO_PIN_3;
+	GPIO_InitStruct.Pin = GPIO_PIN_1;
 	GPIO_InitStruct.Mode = GPIO_MODE_ANALOG;
 	GPIO_InitStruct.Pull = GPIO_NOPULL;
 	HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
@@ -257,7 +267,7 @@ void Get_ADC_Measurements(int8_t *out_temp, uint16_t *out_batt_mv)
 		sConfig.OffsetNumber = ADC_OFFSET_NONE;
 		sConfig.Offset = 0;
 
-		// --- MĚŘENÍ 1: INTERNÍ TEPLOTA ---
+		// Měření 1: interní teplota
 		sConfig.Channel = ADC_CHANNEL_TEMPSENSOR;
 		if (HAL_ADC_ConfigChannel(&hadc1, &sConfig) == HAL_OK)
 		{
@@ -273,7 +283,7 @@ void Get_ADC_Measurements(int8_t *out_temp, uint16_t *out_batt_mv)
 			}
 		}
 
-		// --- MĚŘENÍ 2: NAPĚTÍ BATERIE ---
+		// Měření 2: napětí akumulátoru
 		sConfig.Channel = ADC_CHANNEL_4; // PA3 = CH4
 		if (HAL_ADC_ConfigChannel(&hadc1, &sConfig) == HAL_OK)
 		{
@@ -282,7 +292,7 @@ void Get_ADC_Measurements(int8_t *out_temp, uint16_t *out_batt_mv)
 			{
 				if (HAL_ADC_PollForConversion(&hadc1, 100) == HAL_OK) {
 					uint32_t raw_val = HAL_ADC_GetValue(&hadc1);
-					*out_batt_mv = (raw_val * 3300) / 4095; // (x2 pokud máš dělič)
+					*out_batt_mv = (raw_val * 3300) / 4095;
 				}
 				HAL_ADC_Stop(&hadc1);
 			}
@@ -294,9 +304,7 @@ void Get_ADC_Measurements(int8_t *out_temp, uint16_t *out_batt_mv)
 	__HAL_RCC_ADC_CLK_DISABLE();
 }
 
-// -----------------------------------------------------------------------------
-// ASYNCHRONNÍ TASK PRO BLIKÁNÍ A PÍPÁNÍ
-// -----------------------------------------------------------------------------
+// Asynchroní task pro blikání a pípání
 void APP_MAC_BuzzerTask(void)
 {
 	if (blink_counter > 0)
@@ -325,9 +333,7 @@ void APP_MAC_BuzzerTask(void)
 	}
 }
 
-// =============================================================================
-// ODESLÁNÍ 3BYTE ODPOVĚDI KONTROLE
-// =============================================================================
+// Odeslání 3 bytové odpovědi kontrole
 static void Send_Punch_Response(void)
 {
 	static uint8_t msduHandle = 0;
@@ -337,7 +343,7 @@ static void Send_Punch_Response(void)
 	uint8_t  my_type = DEVICE_CONFIG->comp_device_type;
 	uint32_t my_id   = DEVICE_CONFIG->comp_device_id;
 
-	// --- PŘIDÁNO: TESTOVACÍ PODVRŽENÍ DAT ---
+	// Testovací podvržení dat pro změnu role
 #if (ENABLE_HARDWARE_TEST_MODE == 1)
 	if (debug_mock_mode == 1) {
 		my_type = 0x01; // Typ = Konfigurátor
@@ -374,9 +380,7 @@ static void Send_Punch_Response(void)
 	MAC_MCPSDataReq(&dataReq);
 }
 
-// =============================================================================
-// ZPRACOVÁNÍ PŘIJATÝCH DAT (MOZEK ZÁVODNÍKA)
-// =============================================================================
+// Zpracování přijatých dat
 void APP_MAC_ReceiveData(void)
 {
 	if (g_DataInd.msdu_length == 6)
@@ -385,10 +389,7 @@ void APP_MAC_ReceiveData(void)
 		int8_t rssi = g_DataInd.rssi;
 		uint16_t control_id = (payload[0] << 4) | (payload[1] >> 4);
 
-		// =====================================================================
-		// FIREWALL: OCHRANA UZAVŘENÉHO ZÁVODU
-		// =====================================================================
-		extern bool Logger_IsRaceClosed(void);
+		// FIREWALL: Ochrana uzavřeného závodu
 		if (Logger_IsRaceClosed()) {
 			// Po Cíli hrajeme mrtvého brouka.
 			// Zareagujeme UŽ JEN na CLEAR (Otevření nového závodu a okruhu).
@@ -399,9 +400,7 @@ void APP_MAC_ReceiveData(void)
 			}
 		}
 
-		// =====================================================================
-		// 1. ZÍSKÁNÍ PARAMETRŮ Z KONFIGURAČNÍ PAMĚTI
-		// =====================================================================
+		// 1. Získání parametrů z konfigurační paměti
 		uint8_t window_size = DEVICE_CONFIG->num_hits;
 		if (window_size == 0 || window_size > 32) window_size = 5; // Fallback
 
@@ -410,9 +409,7 @@ void APP_MAC_ReceiveData(void)
 
 		uint16_t cooldown_ms = DEVICE_CONFIG->cooldown_ms;
 
-		// =====================================================================
-		// 2. DEKÓDOVÁNÍ PAKETU DLE TYPU KONTROLY [cite: 140, 149]
-		// =====================================================================
+		// 2. Dekódování paremtrů dle přijaté kontroly
 		int8_t required_rssi = DEFAULT_RSSI_THRESHOLD;
 		uint32_t unix_time = 0;
 		uint8_t sub_seconds = 0;
@@ -421,30 +418,25 @@ void APP_MAC_ReceiveData(void)
 			// U CLEAR kontroly je v 5. bajtu uložen požadovaný RSSI limit
 			required_rssi = -(int8_t)payload[5];
 		} else {
-			// Běžná kontrola - čteme čas [cite: 180, 181]
+			// Běžná kontrola - čteme čas
 			sub_seconds = payload[1] & 0x0F;
 			unix_time = ((uint32_t)payload[2] << 24) | ((uint32_t)payload[3] << 16) |
 									((uint32_t)payload[4] << 8)  |  (uint32_t)payload[5];
 
-			// TÍMTO UKLIDNÍME KOMPILÁTOR (Příkaz nic nedělá, jen maže warning):
 			(void)sub_seconds;
 			(void)unix_time;
 		}
 
 		uint32_t current_tick = HAL_GetTick(); // Lokální čas procesoru v ms
 
-		// =====================================================================
-		// 3. COOLDOWN (Ochrana proti vícenásobnému oražení) [cite: 252]
-		// =====================================================================
+		// 3. COOLDOWN (Ochrana proti vícenásobnému oražení)
 		if (control_id == punched_control_id && (current_tick - last_punch_tick) < cooldown_ms)
 		{
 			FrameOnGoing = FALSE;
 			return; // Jsme v ochranné lhůtě, ignorujeme
 		}
 
-		// =====================================================================
-		// 4. FILTRACE - KLOUZAVÉ OKNO [cite: 183, 253]
-		// =====================================================================
+		// 4. FILTRACE - Klouzavé okno
 		if (control_id != scanning_control_id) {
 			scanning_control_id = control_id;
 			history_mask = 0;
@@ -458,18 +450,14 @@ void APP_MAC_ReceiveData(void)
 			if (history_mask & (1 << i)) valid_hits++;
 		}
 
-		// ---> PŘIDAT TENTO BLOK PRO PŘEDBĚŽNÉ PROBUZENÍ <---
 		// Pokud jsme v IDLE, slyšíme CLEAR kontrolu a paket má dobré RSSI (history_mask & 1)
 		if (control_id == CLEAR_CONTROL_ID && current_race_state == STATE_IDLE && (history_mask & 1)) {
 			current_race_state = STATE_RACING; // Změna stavu zablokuje SleepTask!
 			APP_DBG(">>> RACE STATE: PREDBEZNE PROBUZENI! (Zachycen 1. paket CLEAR) <<<");
 			// Rádio zůstává ZAPNUTÉ. Nyní bleskově dosbíráme zbylé pakety pro oražení.
 		}
-		// ---------------------------------------------------
 
-		// =====================================================================
-		// 5. VYHODNOCENÍ ÚSPĚŠNÉHO ORAŽENÍ
-		// =====================================================================
+		// 5. Vyhodnocení úspěšného oražení
 		if (valid_hits >= hits_required)
 		{
 			APP_DBG(">>> KONTROLA %d ORAZENA! | Sila: %d dBm (Min: %d) | Hity: %d/%d",
@@ -480,7 +468,7 @@ void APP_MAC_ReceiveData(void)
 			last_punch_tick = current_tick;
 			history_mask = 0;
 
-			// --- ANTI-SPAM LOGIKA & ZÁPIS DO FLASH [cite: 226, 227] ---
+			//Antispam logika a zápis do flash paměti
 			bool is_standard_control = (control_id >= 31 && control_id <= 4095) ||
 																 (control_id == CHECK_CONTROL_ID) ||
 																 (control_id == START_CONTROL_ID);
@@ -489,7 +477,7 @@ void APP_MAC_ReceiveData(void)
 
 			if (!is_spam)
 			{
-				// Závodník odesílá odpověď kontrole (obsahuje jeho ID a typ z Configu) [cite: 184, 185]
+				// Závodník odesílá odpověď kontrole (obsahuje jeho ID a typ z Configu)
 				// Pošleme ji 3x pro jistotu doručení (Burst transmission)
 				for(int i=0; i<3; i++) {
 					Send_Punch_Response();
@@ -499,7 +487,7 @@ void APP_MAC_ReceiveData(void)
 					Logger_NewRace(payload);
 					last_written_control_id = control_id;
 
-					// --- START ZÁVODU: TRVALE ZAPNEME RÁDIO ---
+					// Start závodu - trvalé zapnutí rádia
 					if (current_race_state != STATE_RACING) {
 						current_race_state = STATE_RACING;
 						MAC_Set_RX_State(true);
@@ -507,14 +495,14 @@ void APP_MAC_ReceiveData(void)
 					}
 				} else {
 					uint8_t abs_rssi = (uint8_t)(-rssi);
-					// ZÍSKÁNÍ SLOUČENÝCH ADC HODNOT
+					// Získání sloučených ADC hodnot
 					int8_t teplota;
 					uint16_t baterie_mv; // Zde baterii zatím nepotřebujeme, ale musíme ji přečíst
 					Get_ADC_Measurements(&teplota, &baterie_mv);
 					Logger_SavePunch(payload, abs_rssi, teplota);
 					last_written_control_id = control_id;
 
-					// --- CÍL ZÁVODU: USPNEME RÁDIO A NECHÁME JEN BLE ---
+					// Cíl závodu - uspání 802.15.4 a ponechání BLE
 					if (control_id == FINISH_CONTROL_ID) {
 						if (current_race_state == STATE_RACING) {
 							current_race_state = STATE_FINISHED;
@@ -530,7 +518,7 @@ void APP_MAC_ReceiveData(void)
 				APP_DBG("ANTI-SPAM: Kontrola %d jiz zapsana, pouze signalizuji!", control_id);
 			}
 
-			// --- SIGNALIZACE (LED a BZUČÁK) ---
+			// Signalizace pomocí LED a bzučáku
 			// 8 tiků * 500 ms = 4 vteřiny vizuální a akustické odezvy
 			System_Signalize_Start(4);
 		}
@@ -547,11 +535,11 @@ void APP_MAC_ReceiveData(void)
 MAC_Status_t APP_MAC_mcpsDataIndCb( const  MAC_dataInd_t * pDataInd )
 {
 	// FIREWALL: Bezpečnostní kontrola délky (Bod 4)
-	// Pokud je délka paketu nesmyslná (větší než náš standardní 128 bytový buffer
-	// nebo úplně prázdná), paket okamžitě bez milosti zahodíme!
+	// Pokud je délka paketu nesmyslná (větší než standardní 128 bytový buffer
+	// nebo úplně prázdná), paket je okamžitě zahozen
 	if (pDataInd->msdu_length == 0 || pDataInd->msdu_length > 127)
 	{
-		return MAC_SUCCESS; // Tváříme se, že je vše OK, ale data ignorujeme
+		return MAC_SUCCESS; // Data ignorujeme
 	}
 
 	if (FrameOnGoing == FALSE)
@@ -559,7 +547,7 @@ MAC_Status_t APP_MAC_mcpsDataIndCb( const  MAC_dataInd_t * pDataInd )
 		FrameOnGoing = TRUE;
 		memcpy(&g_DataInd, pDataInd, sizeof(MAC_dataInd_t));
 
-		// KRITICKÁ OPRAVA: Okopírujeme fyzické byty, než nám je rádio smaže pod rukama!
+		// Okopírujeme fyzické byty, než je rádio smaže
 		if (pDataInd->msdu_length <= 128) {
 			memcpy(rx_payload_safe, pDataInd->msduPtr, pDataInd->msdu_length);
 			g_DataInd.msduPtr = rx_payload_safe; // Přesměrujeme ukazatel do bezpečí
@@ -570,15 +558,12 @@ MAC_Status_t APP_MAC_mcpsDataIndCb( const  MAC_dataInd_t * pDataInd )
 	return MAC_SUCCESS;
 }
 
-// -----------------------------------------------------------------------------
-// CALLBACK: PAKET ÚSPĚŠNĚ ODESLÁN (ZÁVODNÍK)
-// -----------------------------------------------------------------------------
+// CALLBACK: Paket úspěšně odeslán
 MAC_Status_t APP_MAC_mcpsDataCnfCb( const  MAC_dataCnf_t * pDataCnf )
 {
 	return MAC_SUCCESS;
 }
 
-// ... ostatní callbacky (Reset, Set, Start) zůstávají stejné jako dříve ...
 MAC_Status_t APP_MAC_mlmeResetCnfCb( const  MAC_resetCnf_t * pResetCnf ) { UTIL_SEQ_SetEvt(EVENT_DEVICE_RESET_CNF); return MAC_SUCCESS; }
 MAC_Status_t APP_MAC_mlmeSetCnfCb( const  MAC_setCnf_t * pSetCnf ) { UTIL_SEQ_SetEvt(EVENT_SET_CNF); return MAC_SUCCESS; }
 MAC_Status_t APP_MAC_mlmeStartCnfCb( const  MAC_startCnf_t * pStartCnf ) { UTIL_SEQ_SetEvt(EVENT_DEVICE_STARTED_CNF); return MAC_SUCCESS; }

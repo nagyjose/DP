@@ -18,29 +18,34 @@
   */
 /* USER CODE END Header */
 
-/* Includes ------------------------------------------------------------------*/
-#include "app_common.h"
 
+#include "app_common.h"
 #include "dbg_trace.h"
 #include "ble.h"
 #include "tl.h"
 #include "app_ble.h"
-
 #include "stm32_seq.h"
 #include "shci.h"
 #include "stm32_lpm.h"
 #include "otp.h"
 #include "p2p_server_app.h"
+#include <string.h>
+#include "app_conf.h"
 
-#include <string.h>    // PŘIDÁNO: Pro práci s textem (strlen, memcpy)
-#include "app_conf.h"  // PŘIDÁNO: Pro přístup k DEVICE_CONFIG
+// ===== Defines ==========================================================================
 
-/* Private includes ----------------------------------------------------------*/
-/* USER CODE BEGIN Includes */
+#define APPBLE_GAP_DEVICE_NAME_LENGTH 7
+// 15 minut = 900 vteřin * 1000 * 1000 / CFG_TS_TICK_VAL
+#define FAST_ADV_TIMEOUT               (900*1000*1000/CFG_TS_TICK_VAL)
+#define INITIAL_ADV_TIMEOUT            (900*1000*1000/CFG_TS_TICK_VAL)
+#define BD_ADDR_SIZE_LOCAL    6
+#define LED_ON_TIMEOUT                 (0.005*1000*1000/CFG_TS_TICK_VAL) /**< 5ms */
 
-/* USER CODE END Includes */
-
-/* Private typedef -----------------------------------------------------------*/
+// ===== Global variables =================================================================
+// ===== External variables ===============================================================
+// ===== External functions ===============================================================
+// ===== Function declaration =============================================================
+// ===== Function definition ==============================================================
 
 /**
  * security parameters structure
@@ -170,28 +175,11 @@ typedef struct
 
   uint8_t SwitchOffGPIO_timer_Id;
 }BleApplicationContext_t;
-/* USER CODE BEGIN PTD */
-  
-/* USER CODE END PTD */
 
-/* Private defines -----------------------------------------------------------*/
-#define APPBLE_GAP_DEVICE_NAME_LENGTH 7
-// 15 minut = 900 vteřin * 1000 * 1000 / CFG_TS_TICK_VAL
-#define FAST_ADV_TIMEOUT               (900*1000*1000/CFG_TS_TICK_VAL)
-#define INITIAL_ADV_TIMEOUT            (900*1000*1000/CFG_TS_TICK_VAL)
 
-#define BD_ADDR_SIZE_LOCAL    6
 
-/* USER CODE BEGIN PD */
-#define LED_ON_TIMEOUT                 (0.005*1000*1000/CFG_TS_TICK_VAL) /**< 5ms */
-/* USER CODE END PD */
 
-/* Private macro -------------------------------------------------------------*/
-/* USER CODE BEGIN PM */
 
-/* USER CODE END PM */
-
-/* Private variables ---------------------------------------------------------*/
 PLACE_IN_SECTION("MB_MEM1") ALIGN(4) static TL_CmdPacket_t BleCmdBuffer;
 
 static const uint8_t M_bd_addr[BD_ADDR_SIZE_LOCAL] =
@@ -667,11 +655,9 @@ void APP_BLE_Stop(void)
   APP_DBG("INSERT SOME WAIT");
   HAL_Delay(100);
 
-  /* Stop Advertising Timer */
   HW_TS_Stop(BleApplicationContext.Advertising_mgr_timer_Id);
   HW_TS_Delete(BleApplicationContext.Advertising_mgr_timer_Id);
 
-  /* PŘIDAT TYTO DVA ŘÁDKY: */
 	HW_TS_Stop(BleApplicationContext.SwitchOffGPIO_timer_Id);
 	HW_TS_Delete(BleApplicationContext.SwitchOffGPIO_timer_Id);
 }
@@ -850,9 +836,7 @@ static void Adv_Request(APP_BLE_ConnStatus_t NewStatus)
 		Max_Inter = CFG_LP_CONN_ADV_INTERVAL_MAX;
 	}
 
-	// =========================================================================
-	// 1. BEZPEČNÉ VYČTENÍ JMÉNA Z VOLATILE FLASH PAMĚTI
-	// =========================================================================
+	// Bezpečné vyčtení jména z volatile flash paměti
 	char temp_name[32] = {0};
 
 	// Kopírujeme bajt po bajtu, dokud nenarazíme na konec textu (\0)
@@ -873,9 +857,7 @@ static void Adv_Request(APP_BLE_ConnStatus_t NewStatus)
 		name_len = 25;
 	}
 
-	// =========================================================================
-	// 2. SESTAVENÍ POLE PRO BLE ADVERTISING
-	// =========================================================================
+	// Sestavení pole pro BLE advertising
 	uint8_t local_name[32];
 
 	// BLE vyžaduje, aby první bajt určoval typ informace (Zde: Kompletní jméno)
@@ -894,17 +876,15 @@ static void Adv_Request(APP_BLE_ConnStatus_t NewStatus)
 	 0x06, AD_TYPE_MANUFACTURER_SPECIFIC_DATA, 0x30, 0x00, 0x00, 0x00, 0x00
 	};
 
-	// =========================================================================
-	// 3. REGISTRACE DO BLUETOOTH VYSÍLAČE
-	// =========================================================================
+	// Registrace do BLE vysílače
 	ret = aci_gap_set_discoverable(
 		ADV_IND,
 		Min_Inter,
 		Max_Inter,
 		GAP_PUBLIC_ADDR,
 		NO_WHITE_LIST_USE, /* use white list */
-		local_name_size,   /* NAŠE DYNAMICKÁ VELIKOST */
-		local_name,        /* NAŠE DYNAMICKÉ JMÉNO */
+		local_name_size,   // Dynamická velikost
+		local_name,        // Dynamické jméno
 		sizeof(adv_data),
 		(uint8_t*) &adv_data,
 		0,

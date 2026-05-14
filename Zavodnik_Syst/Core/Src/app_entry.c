@@ -16,8 +16,6 @@
   ******************************************************************************
   */
 
-
-/* Includes ------------------------------------------------------------------*/
 #include <stdio.h>
 #include <string.h>
 #include "app_entry.h"
@@ -40,6 +38,8 @@
 #include "stm_logging.h"
 #include "app_ffd_mac_802_15_4_process.h"
 
+// ===== Defines ==========================================================================
+
 #define HOST_SYS_EVTCODE                (0xFFU)
 #define HOST_SYS_SUBEVTCODE_BASE        (0x9200U)
 #define HOST_SYS_SUBEVTCODE_READY        (HOST_SYS_SUBEVTCODE_BASE + 0U)
@@ -55,22 +55,14 @@ static void UartCmdExecute(void);
 
 #define SWITCH_TMO 1000*1000/CFG_TS_TICK_VAL/2   /* 500 ms */
 
-static uint8_t aRxBuffer[RX_BUFFER_SIZE];
-EXTI_HandleTypeDef exti_handle;
-
 /* Error code */
 #define ERR_INTERFACE_FATAL_1 1
 #define ERR_INTERFACE_FATAL_2 2
 
-extern void APP_FFD_MAC_802_15_4_SetupTask(void);
-extern void APP_FFD_MAC_802_15_4_CoordSrvTask(void);
-extern void APP_FFD_MAC_802_15_4_CoordDataTask(void);
+// ===== Global variables =================================================================
 
-extern uint8_t g_srvSerReq;
-extern uint8_t g_srvDataReq;
-extern RTC_HandleTypeDef hrtc;
-
-/* Global variables  -------------------------------------------------*/
+static uint8_t aRxBuffer[RX_BUFFER_SIZE];
+EXTI_HandleTypeDef exti_handle;
 char CommandString[C_SIZE_CMD_STRING];
 __IO uint16_t indexReceiveChar = 0U;
 __IO uint16_t remainingRxChar = 0U;
@@ -78,35 +70,38 @@ __IO uint16_t CptReceiveCmdFromUser = 0U;
 __IO uint16_t remainSendChar = 0U;
 __IO uint16_t CptSendCmdToUser = 0U;
 
-/* Private function definition -------------------------------------------------*/
-
 PLACE_IN_SECTION("MB_MEM1") ALIGN(4) static TL_MAC_802_15_4_Config_t Mac_802_15_4_ConfigBuffer;
-
 PLACE_IN_SECTION("MB_MEM2") ALIGN(4) static TL_CmdPacket_t Mac_802_15_4_CmdBuffer;
 PLACE_IN_SECTION("MB_MEM2") ALIGN(4) static uint8_t Mac_802_15_4_NotifRspEvtBuffer[sizeof(TL_PacketHeader_t) + TL_EVT_HDR_SIZE + 255U];
-
 PLACE_IN_SECTION("MB_MEM2") ALIGN(4) static uint8_t EvtPool[POOL_SIZE];
 PLACE_IN_SECTION("MB_MEM2") ALIGN(4) static TL_CmdPacket_t SystemCmdBuffer;
 PLACE_IN_SECTION("MB_MEM2") ALIGN(4) static uint8_t SystemSpareEvtBuffer[sizeof(TL_PacketHeader_t) + TL_EVT_HDR_SIZE + 255U];
-
 PLACE_IN_SECTION("MB_MEM2") ALIGN(4) char mac_802_15_4_CnfIndNot[C_SIZE_CMD_STRING];
 
 static SHCI_C2_CONCURRENT_Mode_Param_t ConcurrentMode = MAC_ENABLE;
 //static uint8_t TS_ID1;
 
-
-/*----------------------------------------------------------------------------*/
 static TL_CmdPacket_t *p_mac_802_15_4_cmdbuffer;
 static TL_EvtPacket_t *p_mac_802_15_4_notif_RFCore_to_M4;
 static int NbTotalSwitch = 0;
 static int FlagSwitchingOnGoing = 0;
 static __IO uint32_t  CptReceiveMsgFromRFCore = 0U; /* Debug counter */
 
+// ===== External variables ===============================================================
 
-/* Global function prototypes -----------------------------------------------*/
+extern uint8_t g_srvSerReq;
+extern uint8_t g_srvDataReq;
+extern RTC_HandleTypeDef hrtc;
+
+// ===== External functions ===============================================================
+
+extern void APP_FFD_MAC_802_15_4_SetupTask(void);
+extern void APP_FFD_MAC_802_15_4_CoordSrvTask(void);
+extern void APP_FFD_MAC_802_15_4_CoordDataTask(void);
+
+// ===== Function declaration =============================================================
+
 size_t DbgTraceWrite(int handle, const unsigned char * buf, size_t bufSize);
-
-/* Private function prototypes -----------------------------------------------*/
 static void appe_Tl_Init(void);
 static void Led_Init(void);
 static void Button_Init( void );
@@ -124,8 +119,8 @@ static void APPE_SysEvtReadyProcessing( void);
 static void APP_TraceError(char * pMess, uint32_t ErrCode);
 static void APP_CheckWirelessFirmwareInfo(void);
 
+// ===== Function definition ==============================================================
 
-/* Functions Definition ------------------------------------------------------*/
 void APP_Init( void )
 {
  SystemPower_Config(); /**< Configure the system Power Mode */
@@ -424,12 +419,8 @@ static void APPE_SysEvtReadyProcessing()
   /* Check wireless version */
   APP_CheckWirelessFirmwareInfo();
 
-  // ===========================================================================
-	// START EXKLUZIVNÍHO MÓDU (Pouze MAC vrstva, BLE čeká na Cíl/Magnet)
-	// ===========================================================================
 	APP_DBG(">>> BOOTUJI DO MAC SNIFFING MODU <<<");
 
-	// ZDE JSME SMAZALI VOLÁNÍ APP_BLE_Init(); !!!
 	APP_FFD_MAC_802_15_4_Init(APP_MAC_802_15_4_FULL, &Mac_802_15_4_CmdBuffer);
 
   UTIL_LPM_SetOffMode(1U << CFG_LPM_APP, UTIL_LPM_ENABLE);
@@ -581,14 +572,14 @@ void HAL_GPIO_EXTI_Callback( uint16_t GPIO_Pin )
 		break;
 
   case BUTTON_SW2_PIN:
-		// BEZPEČNOSTNÍ POJISTKA: Během závodu ignorujeme magnety i tlačítka!
+		// BEZPEČNOSTNÍ POJISTKA: Během závodu ignorujeme magnety i tlačítka
 		if (current_race_state == STATE_RACING) {
 			APP_DBG("SECURITY: Ignoruji magnet - probiha ZAVOD!");
 			return;
 		}
 
 		APP_DBG("MAGNET DETEKOVAN -> Prepinam protokol (BLE <-> MAC)");
-		// Pokud běželo BLE, vypne ho to a zapne MAC. A obráceně!
+		// Pokud běželo BLE, vypne ho to a zapne MAC. A obráceně
 		UTIL_SEQ_SetTask(1U << CFG_TASK_INIT_SWITCH_PROTOCOL, CFG_SCH_PRIO_0);
 		break;
 

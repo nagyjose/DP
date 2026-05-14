@@ -18,17 +18,12 @@
 #include "shci.h"
 #include "stm_logging.h"
 
-/* Defines -----------------------------------------------*/
+// ===== Defines ==========================================================================
+
 #define DEMO_CHANNEL 26
 
-/* Private function prototypes -----------------------------------------------*/
-static void APP_FFD_MAC_802_15_4_Config(void);
-extern void APP_MAC_BuzzerTask(void);
-static void BuzzerTimer_Callback(void) {
-	UTIL_SEQ_SetTask(1 << CFG_TASK_BUZZER, CFG_SCH_PRIO_0);
-}
+// ===== Global variables =================================================================
 
-/* variables -----------------------------------------------*/
 MAC_associateInd_t g_MAC_associateInd;
 MAC_callbacks_t macCbConfig ;
 uint8_t g_srvSerReq;
@@ -36,7 +31,23 @@ uint8_t g_srvDataReq;
 __IO ITStatus CertifOutputPeripheralReady = SET;
 uint8_t BuzzerTimerId;
 
-/* Functions Definition ------------------------------------------------------*/
+// ===== External variables ===============================================================
+// ===== External functions ===============================================================
+
+extern void APP_MAC_BuzzerTask(void);
+extern void Race_StateMachine_Init(void);
+
+// ===== Function declaration =============================================================
+
+static void APP_FFD_MAC_802_15_4_Config(void);
+
+// ===== Function definition ==============================================================
+
+static void BuzzerTimer_Callback(void) {
+	UTIL_SEQ_SetTask(1 << CFG_TASK_BUZZER, CFG_SCH_PRIO_0);
+}
+
+
 void APP_FFD_MAC_802_15_4_Init( APP_MAC_802_15_4_InitMode_t InitMode, TL_CmdPacket_t* pCmdBuffer)
 {
   APP_ENTRY_RegisterCmdBuffer(pCmdBuffer);
@@ -55,13 +66,13 @@ void APP_FFD_MAC_802_15_4_Init( APP_MAC_802_15_4_InitMode_t InitMode, TL_CmdPack
   HW_TS_Create(CFG_TIM_PROC_ID_ISR, &BuzzerTimerId, 0, BuzzerTimer_Callback);
 
   APP_FFD_MAC_802_15_4_Config();
-  //Race_StateMachine_Init(); // <-- ZDE SPUSTÍME NÁŠ AUTOMAT
+  //Race_StateMachine_Init(); // Zde spustíme automat
   UTIL_SEQ_SetTask( 1<< CFG_TASK_FFD, CFG_SCH_PRIO_0 );
 }
 
 void APP_FFD_MAC_802_15_4_Stop()
 {
-	// ZASTAVÍME NAŠE ČASOVAČE, ABY NEŠKODILY BLUETOOTHU!
+	// Zastavení časovačů, aby nepoškodily BLE
 	extern void Race_StateMachine_Stop(void);
 	Race_StateMachine_Stop();
 
@@ -93,7 +104,7 @@ void APP_FFD_MAC_802_15_4_SetupTask(void)
 {
   MAC_resetReq_t    ResetReq;
   MAC_setReq_t      SetReq;
-  MAC_startReq_t    StartReq; // PŘIDÁNO ZPĚT!
+  MAC_startReq_t    StartReq;
 
   long long extAddr = 0xACDE480000000002;
   uint16_t shortAddr   = 0x2233;
@@ -120,9 +131,6 @@ void APP_FFD_MAC_802_15_4_SetupTask(void)
   MAC_MLMESetReq( &SetReq );
   UTIL_SEQ_WaitEvt( 1U << CFG_EVT_SET_CNF );
 
-  // =========================================================================
-  // BEZ TOHOTO STARTU BY RÁDIO IGNOROVALO NAŠE 30ms PROBOUZENÍ
-  // =========================================================================
   memset(&StartReq,0x00,sizeof(MAC_startReq_t));
   memcpy(StartReq.a_PAN_id,(uint8_t*)&panId,0x02);
   StartReq.channel_number   = channel;
@@ -133,9 +141,6 @@ void APP_FFD_MAC_802_15_4_SetupTask(void)
   MAC_MLMEStartReq( &StartReq);
   UTIL_SEQ_WaitEvt( 1U << CFG_EVT_DEVICE_STARTED_CNF );
 
-  // =========================================================================
-  // ZAPNUTÍ MAC VRSTVY - VE STAVU USPANÉ ANTÉNY (Volno pro BLE!)
-  // =========================================================================
   memset(&SetReq,0x00,sizeof(MAC_setReq_t));
   SetReq.PIB_attribute = g_MAC_RX_ON_WHEN_IDLE_c;
   PIB_Value = g_FALSE; // !!! ZAČÍNÁME SPÁNKEM !!!
@@ -146,10 +151,6 @@ void APP_FFD_MAC_802_15_4_SetupTask(void)
   APP_DBG("ZAVODNIK READY - MAC Inicializovan a USPAN!");
   BSP_LED_On(LED_BLUE);
 
-  // =========================================================================
-  // SPUŠTĚNÍ AUTOMATU
-  // =========================================================================
-  extern void Race_StateMachine_Init(void);
   Race_StateMachine_Init();
 }
 
@@ -161,11 +162,9 @@ static void APP_FFD_MAC_802_15_4_Config()
   macCbConfig.mlmeSetCnfCb = APP_MAC_mlmeSetCnfCb;
   macCbConfig.mlmeStartCnfCb = APP_MAC_mlmeStartCnfCb;
   macCbConfig.mcpsDataIndCb = APP_MAC_mcpsDataIndCb;
-
-  // TÍMTO ŘÁDKEM PROPOJÍME TEN NÁŠ NOVÝ CALLBACK Z KROKU 1!
   macCbConfig.mcpsDataCnfCb = APP_MAC_mcpsDataCnfCb;
 
-  // --- AGRESIVNÍ VYSÍLÁNÍ I PRO ZÁVODNÍKA (Vypnutí CSMA/CA) ---
+  // Agresivní vysílání (Vypnutí CSMA/CA)
 	MAC_setReq_t setReq;
 	uint8_t max_backoffs = 0;
 	setReq.PIB_attribute = 0x47; // macMaxCSMABackoffs

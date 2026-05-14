@@ -1,3 +1,23 @@
+/* USER CODE BEGIN Header */
+/**
+  ******************************************************************************
+ * @file    flash_logger.h
+ * @author  Josef Nagy
+ * @brief
+  ******************************************************************************
+  * @attention
+  *
+  * Copyright (c) 2026 Josef Nagy.
+  * All rights reserved.
+  *
+  * This software is licensed under terms that can be found in the LICENSE file
+  * in the root directory of this software component.
+  * If no LICENSE file comes with this software, it is provided AS-IS.
+  *
+  ******************************************************************************
+  */
+/* USER CODE END Header */
+
 #ifndef FLASH_LOGGER_H
 #define FLASH_LOGGER_H
 
@@ -5,13 +25,13 @@
 #include "app_conf.h"
 #include <stdbool.h>
 
-// Stejné adresy jako u Závodníka (zbylo nám tu 159 volných stránek)
+// Stejné adresy jako u Závodníka (zbylo 159 volných stránek)
 #define LOGGER_START_ADDR       0x08021000
 #define LOGGER_PAGE_SIZE        4096
 #define LOGGER_MAX_PAGES        159 
 #define LOGGER_MAX_RECORDS_PP   (LOGGER_PAGE_SIZE / 8) // 512 záznamů
 
-// --- NAŠE NOVÁ 8BAJTOVÁ STRUKTURA PRO KONTROLU ---
+// 8 bytová struktura pro kontrolu
 typedef union {
     uint64_t double_word;
     struct {
